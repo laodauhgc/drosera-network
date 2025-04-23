@@ -142,33 +142,6 @@ function install_drosera_node() {
         exit 1
     fi
 
-    # 提示用户输入 EVM 钱包地址并修改 drosera.toml
-    echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
-    read WALLET_ADDRESS
-    if [ -z "$WALLET_ADDRESS" ]; then
-        echo "错误：未提供钱包地址，drosera.toml 修改将失败"
-        exit 1
-    fi
-
-    # 检查 drosera.toml 是否存在
-    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
-    if [ -f "$DROsera_TOML" ]; then
-        # 修改 whitelist
-        if grep -q "whitelist = \[\]" "$DROsera_TOML"; then
-            sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
-            echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
-        else
-            echo "错误：drosera.toml 中未找到 'whitelist = []'，请检查文件内容"
-            exit 1
-        fi
-        # 添加 private_trap = true
-        echo "private_trap = true" >> "$DROsera_TOML"
-        echo "已添加 private_trap = true 到 drosera.toml"
-    else
-        echo "错误：drosera.toml 未找到（$DROsera_TOML），可能是 forge init 失败"
-        exit 1
-    fi
-
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     echo "请输入 EVM 钱包私钥："
@@ -200,6 +173,33 @@ function install_drosera_node() {
             echo "drosera dryrun 失败，请检查 Drosera 配置或环境"
             exit 1
         fi
+
+            # 提示用户输入 EVM 钱包地址并修改 drosera.toml
+    echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
+    read WALLET_ADDRESS
+    if [ -z "$WALLET_ADDRESS" ]; then
+        echo "错误：未提供钱包地址，drosera.toml 修改将失败"
+        exit 1
+    fi
+
+    # 检查 drosera.toml 是否存在
+    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
+    if [ -f "$DROsera_TOML" ]; then
+        # 修改 whitelist
+        if grep -q "whitelist = \[\]" "$DROsera_TOML"; then
+            sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
+            echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
+        else
+            echo "错误：drosera.toml 中未找到 'whitelist = []'，请检查文件内容"
+            exit 1
+        fi
+        # 添加 private_trap = true
+        echo "private_trap = true" >> "$DROsera_TOML"
+        echo "已添加 private_trap = true 到 drosera.toml"
+    else
+        echo "错误：drosera.toml 未找到（$DROsera_TOML），可能是 forge init 失败"
+        exit 1
+    fi
 
         # 执行第二次 drosera apply
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
