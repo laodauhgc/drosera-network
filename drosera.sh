@@ -2,23 +2,24 @@
 
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
+SCRIPT_PATH="$HOME/Drosera.sh"
+
+# 确保以 root 权限运行
+if [ "$EUID" -ne 0 ]; then
+    echo "请以 root 权限运行此脚本 (sudo)"
+    exit 1
+fi
 
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
-    # 检查是否以 root 权限运行
-    if [ "$EUID" -ne 0 ]; then
-        echo "请以 root 权限运行此脚本 (sudo)"
-        exit 1
-    fi
-
     # 更新系统包
     echo "正在更新系统包..."
-    apt-get update && apt-get upgrade -y
+    apt-get update && apt-get upgrade -y || { echo "系统包更新失败"; exit 1; }
 
     # 检查 jq 是否安装
     if ! command -v jq &> /dev/null; then
         echo "jq 未安装，正在安装..."
-        apt-get install -y jq
+        apt-get install -y jq || { echo "jq 安装失败"; exit 1; }
         echo "jq 安装完成"
     else
         echo "jq 已安装，检查更新..."
@@ -32,7 +33,7 @@ function install_drosera_node() {
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
         add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
         apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io
+        apt-get install -y docker-ce docker-ce-cli containerd.io || { echo "Docker 安装失败"; exit 1; }
         echo "Docker 安装完成"
     else
         echo "Docker 已安装，检查更新..."
@@ -46,24 +47,23 @@ function install_drosera_node() {
     # 检查 Docker Compose 是否安装
     if ! command -v docker-compose &> /dev/null; then
         echo "Docker Compose 未安装，正在安装最新版本..."
-        DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
+        docker-compose --version || { echo "Docker Compose 安装失败"; exit 1; }
         echo "Docker Compose 安装完成"
     else
         echo "Docker Compose 已安装，检查更新..."
-        DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
     fi
 
     # 安装 Bun
     echo "正在安装 Bun..."
-    curl -fsSL https://bun.sh/install | bash
-    # 检查 Bun 是否安装成功
+    curl -fsSL https://bun.sh/install | bash || { echo "Bun 安装失败"; exit 1; }
     BUN_BIN="/root/.bun/bin/bun"
     if [ -f "$BUN_BIN" ]; then
         echo "Bun 安装完成"
+        export PATH=$PATH:/root/.bun/bin
     else
         echo "Bun 安装失败，请检查网络或 https://bun.sh/install"
         exit 1
@@ -71,10 +71,11 @@ function install_drosera_node() {
 
     # 安装 Foundry
     echo "正在安装 Foundry..."
-    curl -L https://foundry.paradigm.xyz | bash
-    # 添加 Foundry 的环境变量（确保 foundryup 可执行）
+    curl -L https://foundry.paradigm.xyz | bash || { echo "Foundry 安装失败"; exit 1; }
     if [ -f "/root/.foundry/bin/foundryup" ]; then
         /root/.foundry/bin/foundryup
+        export PATH=$PATH:/root/.foundry/bin
+        forge --version || { echo "forge 未安装"; exit 1; }
         echo "Foundry 安装完成"
     else
         echo "Foundry 安装失败，请检查网络或 https://foundry.paradigm.xyz"
@@ -83,24 +84,35 @@ function install_drosera_node() {
 
     # 安装 Drosera
     echo "正在安装 Drosera..."
-    curl -L https://app.drosera.io/install | bash
-    echo "Drosera 安装完成"
-
-    # 检查并运行 Drosera
-    DROsera_BIN="/root/.drosera/bin/drosera"
-    if [ -f "$DROsera_BIN" ]; then
-        echo "找到 Drosera，正在运行..."
-        $DROsera_BIN
+    curl -L https://app.drosera.io/install | bash || { echo "Drosera 安装失败"; exit 1; }
+    source /root/.bashrc
+    export PATH=$PATH:/root/.drosera/bin
+    if command -v droseraup &> /dev/null; then
+        droseraup || { echo "droseraup 执行失败"; exit 1; }
+        echo "Drosera 安装完成"
     else
-        echo "Drosera 未找到（$DROsera_BIN 不存在），可能是安装失败"
+        echo "droseraup 命令未找到，Drosera 安装失败"
+        exit 1
     fi
 
-    # 运行 droseraup
+    # 检查 Drosera 二进制文件并验证版本
+    DROsera_BIN="/root/.drosera/bin/drosera"
+    if [ -f "$DROsera_BIN" ]; then
+        echo "找到 Drosera，正在验证版本..."
+        $DROsera_BIN --version || { echo "Drosera 版本检查失败"; exit 1; }
+        echo "Drosera 版本检查成功"
+    else
+        echo "Drosera 未找到（$DROsera_BIN 不存在）"
+        exit 1
+    fi
+
+    # 运行 droseraup（确保最新版本）
     if command -v droseraup &> /dev/null; then
         echo "正在运行 droseraup..."
-        droseraup
+        droseraup || { echo "droseraup 执行失败"; exit 1; }
     else
-        echo "droseraup 命令未找到，可能是未正确安装或不在 PATH 中"
+        echo "droseraup 命令未找到"
+        exit 1
     fi
 
     # 创建 my-drosera-trap 目录并切换
@@ -114,33 +126,18 @@ function install_drosera_node() {
 
     # 初始化 Foundry 模板
     echo "初始化 Foundry 模板..."
-    forge init -t drosera-network/trap-foundry-template
-    if [ $? -eq 0 ]; then
-        echo "Foundry 模板初始化完成"
-    else
-        echo "Foundry 模板初始化失败，请检查网络或 drosera-network/trap-foundry-template 仓库"
-        exit 1
-    fi
+    forge init -t drosera-network/trap-foundry-template || { echo "Foundry 模板初始化失败"; exit 1; }
+    echo "Foundry 模板初始化完成"
 
     # 执行 bun install
     echo "执行 bun install..."
-    bun install
-    if [ $? -eq 0 ]; then
-        echo "bun install 完成"
-    else
-        echo "bun install 失败，请检查 package.json 或 Bun 环境"
-        exit 1
-    fi
+    bun install || { echo "bun install 失败"; exit 1; }
+    echo "bun install 完成"
 
     # 执行 forge build
     echo "执行 forge build..."
-    forge build
-    if [ $? -eq 0 ]; then
-        echo "forge build 完成"
-    else
-        echo "forge build 失败，请检查项目配置或 Foundry 环境"
-        exit 1
-    fi
+    forge build || { echo "forge build 失败"; exit 1; }
+    echo "forge build 完成"
 
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
@@ -151,13 +148,8 @@ function install_drosera_node() {
     else
         echo "正在执行 drosera apply..."
         export DROSERA_PRIVATE_KEY
-        echo "ofc" | drosera apply
-        if [ $? -eq 0 ]; then
-            echo "drosera apply 完成"
-        else
-            echo "drosera apply 失败，请检查私钥或 Drosera 配置"
-            exit 1
-        fi
+        echo "ofc" | drosera apply || { echo "drosera apply 失败"; exit 1; }
+        echo "drosera apply 完成"
     fi
 
     # 询问用户是否继续进行下一步
@@ -166,40 +158,35 @@ function install_drosera_node() {
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
         echo "正在执行 drosera dryrun..."
         cd /root/my-drosera-trap
-        drosera dryrun
-        if [ $? -eq 0 ]; then
-            echo "drosera dryrun 完成"
-        else
-            echo "drosera dryrun 失败，请检查 Drosera 配置或环境"
+        drosera dryrun || { echo "drosera dryrun 失败"; exit 1; }
+        echo "drosera dryrun 完成"
+
+        # 提示用户输入 EVM 钱包地址并修改 drosera.toml
+        echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
+        read WALLET_ADDRESS
+        if [ -z "$WALLET_ADDRESS" ]; then
+            echo "错误：未提供钱包地址"
             exit 1
         fi
 
-            # 提示用户输入 EVM 钱包地址并修改 drosera.toml
-    echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
-    read WALLET_ADDRESS
-    if [ -z "$WALLET_ADDRESS" ]; then
-        echo "错误：未提供钱包地址，drosera.toml 修改将失败"
-        exit 1
-    fi
-
-    # 检查 drosera.toml 是否存在
-    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
-    if [ -f "$DROsera_TOML" ]; then
-        # 修改 whitelist
-        if grep -q "whitelist = \[\]" "$DROsera_TOML"; then
-            sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
-            echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
+        # 检查 drosera.toml 是否存在
+        DROsera_TOML="/root/my-drosera-trap/drosera.toml"
+        if [ -f "$DROsera_TOML" ]; then
+            # 修改 whitelist
+            if grep -q "whitelist = \[\]" "$DROsera_TOML"; then
+                sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
+                echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
+            else
+                echo "错误：drosera.toml 中未找到 'whitelist = []'"
+                exit 1
+            fi
+            # 添加 private_trap = true
+            echo "private_trap = true" >> "$DROsera_TOML"
+            echo "已添加 private_trap = true 到 drosera.toml"
         else
-            echo "错误：drosera.toml 中未找到 'whitelist = []'，请检查文件内容"
+            echo "错误：drosera.toml 未找到（$DROsera_TOML）"
             exit 1
         fi
-        # 添加 private_trap = true
-        echo "private_trap = true" >> "$DROsera_TOML"
-        echo "已添加 private_trap = true 到 drosera.toml"
-    else
-        echo "错误：drosera.toml 未找到（$DROsera_TOML），可能是 forge init 失败"
-        exit 1
-    fi
 
         # 执行第二次 drosera apply
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
@@ -207,85 +194,56 @@ function install_drosera_node() {
         else
             echo "正在执行第二次 drosera apply..."
             cd /root/my-drosera-trap
-            DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY echo "ofc" | drosera apply
-            if [ $? -eq 0 ]; then
-                echo "第二次 drosera apply 完成"
-            else
-                echo "第二次 drosera apply 失败，请检查私钥或 Drosera 配置"
-                exit 1
-            fi
+            DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY echo "ofc" | drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
+            echo "第二次 drosera apply 完成"
         fi
 
         # 切换到主目录并安装 Drosera Operator
         echo "切换到主目录并安装 Drosera Operator..."
         cd ~
         curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
-        tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
+        tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "Drosera Operator 解压失败"; exit 1; }
         echo "Drosera Operator 安装完成"
 
         # 测试 Drosera Operator
         echo "测试 Drosera Operator 是否正常运行..."
-        ./drosera-operator --version
-        if [ $? -eq 0 ]; then
-            echo "Drosera Operator 版本检查成功"
-        else
-            echo "Drosera Operator 版本检查失败，请检查二进制文件"
-            exit 1
-        fi
+        ./drosera-operator --version || { echo "Drosera Operator 版本检查失败"; exit 1; }
+        echo "Drosera Operator 版本检查成功"
 
         # 复制 Drosera Operator 到 /usr/bin
         echo "复制 Drosera Operator 到 /usr/bin..."
-        sudo cp drosera-operator /usr/bin
-        if [ $? -eq 0 ]; then
-            echo "Drosera Operator 已成功复制到 /usr/bin"
-        else
-            echo "复制 Drosera Operator 到 /usr/bin 失败"
-            exit 1
-        fi
+        cp drosera-operator /usr/bin || { echo "复制 Drosera Operator 失败"; exit 1; }
+        echo "Drosera Operator 已成功复制到 /usr/bin"
 
         # 拉取 Drosera Operator 的最新 Docker 镜像
         echo "正在拉取 Drosera Operator 的最新 Docker 镜像..."
-        docker pull ghcr.io/drosera-network/drosera-operator:latest
-        if [ $? -eq 0 ]; then
-            echo "Drosera Operator Docker 镜像拉取完成"
-        else
-            echo "Drosera Operator Docker 镜像拉取失败，请检查网络或 Docker 配置"
-            exit 1
-        fi
+        docker pull ghcr.io/drosera-network/drosera-operator:latest || { echo "Drosera Operator Docker 镜像拉取失败"; exit 1; }
+        echo "Drosera Operator Docker 镜像拉取完成"
 
         # 运行 Drosera Operator 注册
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：未提供私钥，drosera-operator register 将跳过"
         else
             echo "正在运行 Drosera Operator 注册..."
-            drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key $DROSERA_PRIVATE_KEY
-            if [ $? -eq 0 ]; then
-                echo "Drosera Operator 注册完成"
-            else
-                echo "Drosera Operator 注册失败，请检查私钥或 Holesky RPC 连接"
-                exit 1
-            fi
+            drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key $DROSERA_PRIVATE_KEY || { echo "Drosera Operator 注册失败"; exit 1; }
+            echo "Drosera Operator 注册完成"
         fi
 
         # 配置并启用防火墙
         echo "正在配置并启用防火墙..."
-        sudo ufw allow ssh
-        sudo ufw allow 22
-        sudo ufw enable
-        echo "防火墙已启用，允许 SSH 和端口 22"
-
-        # 允许 Drosera 端口
-        echo "正在允许 Drosera 端口..."
-        sudo ufw allow 31313/tcp
-        sudo ufw allow 31314/tcp
-        echo "已允许 Drosera 端口 31313/tcp 和 31314/tcp"
+        ufw allow ssh
+        ufw allow 22
+        ufw allow 31313/tcp
+        ufw allow 31314/tcp
+        ufw enable
+        echo "防火墙已启用，允许 SSH 和 Drosera 端口"
 
         # 检查并停止 drosera 服务
         echo "正在检查 drosera 服务状态..."
         if systemctl is-active --quiet drosera; then
             echo "drosera 服务正在运行，正在停止并禁用..."
-            sudo systemctl stop drosera
-            sudo systemctl disable drosera
+            systemctl stop drosera
+            systemctl disable drosera
             echo "drosera 服务已停止并禁用"
         else
             echo "drosera 服务未运行，无需停止"
@@ -293,30 +251,20 @@ function install_drosera_node() {
 
         # 拉取 Drosera-Network 仓库
         echo "正在拉取 Drosera-Network 仓库..."
-        git clone https://github.com/sdohuajia/Drosera-Network.git
-        if [ $? -eq 0 ]; then
-            echo "Drosera-Network 仓库拉取完成"
-        else
-            echo "Drosera-Network 仓库拉取失败，请检查网络或 https://github.com/sdohuajia/Drosera-Network.git"
-            exit 1
-        fi
+        git clone https://github.com/sdohuajia/Drosera-Network.git || { echo "Drosera-Network 仓库拉取失败"; exit 1; }
+        echo "Drosera-Network 仓库拉取完成"
 
         # 切换到 Drosera-Network 目录并复制 .env 文件
         echo "切换到 Drosera-Network 目录并复制 .env 文件..."
         cd Drosera-Network
-        cp .env.example .env
-        if [ $? -eq 0 ]; then
-            echo ".env 文件复制完成"
-        else
-            echo ".env 文件复制失败，请检查 .env.example 是否存在"
-            exit 1
-        fi
+        cp .env.example .env || { echo ".env 文件复制失败"; exit 1; }
+        echo ".env 文件复制完成"
 
         # 提示用户输入服务器 IP 并写入 .env
         echo "请输入服务器公网 IP 地址（用于 .env 的 VPS_IP）："
         read SERVER_IP
         if [ -z "$SERVER_IP" ]; then
-            echo "错误：未提供服务器 IP，.env 配置将失败"
+            echo "错误：未提供服务器 IP"
             exit 1
         fi
         sed -i "s/VPS_IP=.*/VPS_IP=$SERVER_IP/" .env
@@ -332,13 +280,8 @@ function install_drosera_node() {
 
         # 启动 Docker Compose 服务
         echo "正在启动 Docker Compose 服务..."
-        docker compose up -d
-        if [ $? -eq 0 ]; then
-            echo "Docker Compose 服务启动完成"
-        else
-            echo "Docker Compose 服务启动失败，请检查 docker-compose.yml 或 Docker 配置"
-            exit 1
-        fi
+        docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        echo "Docker Compose 服务启动完成"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
         return
