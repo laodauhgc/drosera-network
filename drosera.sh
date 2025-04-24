@@ -11,9 +11,11 @@ fi
 
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
-    # 更新系统包
-    echo "正在更新系统包..."
+    # 更新系统包并安装依赖
+    echo "正在更新系统包并安装依赖..."
     apt-get update && apt-get upgrade -y || { echo "系统包更新失败"; exit 1; }
+    apt-get install -y curl ufw iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip || { echo "依赖安装失败"; exit 1; }
+    echo "依赖安装完成"
 
     # 检查 jq 是否安装
     if ! command -v jq &> /dev/null; then
