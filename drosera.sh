@@ -187,6 +187,8 @@ function install_drosera_node() {
             exit 1
         fi
 
+        sleep 10
+
         # 执行第二次 drosera apply
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：未提供私钥，第二次 drosera apply 将跳过"
