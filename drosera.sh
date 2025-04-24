@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 确保 PATH 包含 Drosera
+export PATH=$PATH:/root/.drosera/bin
+
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
 
@@ -60,6 +63,13 @@ function install_drosera_node() {
 
     # 安装 Bun
     echo "正在安装 Bun..."
+    echo "正在检查并安装 unzip..."
+    if ! command -v unzip &> /dev/null; then
+        apt-get install -y unzip || { echo "unzip 安装失败"; exit 1; }
+        echo "unzip 安装完成"
+    else
+        echo "unzip 已安装"
+    fi
     curl -fsSL https://bun.sh/install | bash || { echo "Bun 安装失败"; exit 1; }
     BUN_BIN="/root/.bun/bin/bun"
     if [ -f "$BUN_BIN" ]; then
@@ -175,23 +185,23 @@ function install_drosera_node() {
         # 检查 drosera.toml 是否存在
         DROsera_TOML="/root/my-drosera-trap/drosera.toml"
         if [ -f "$DROsera_TOML" ]; then
-        # 检查是否包含 whitelist 字段（宽松匹配）
-        if grep -q "[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]" "$DROsera_TOML"; then
-        sed -i "s/[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
-        echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
+            # 检查是否包含 whitelist 字段（宽松匹配）
+            if grep -q "[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]" "$DROsera_TOML"; then
+                sed -i "s/[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
+                echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
+            else
+                echo "未找到空的 whitelist = []，尝试追加..."
+                echo "whitelist = [\"$WALLET_ADDRESS\"]" >> "$DROsera_TOML"
+                echo "已添加 whitelist = [\"$WALLET_ADDRESS\"] 到 drosera.toml"
+            fi
+            # 添加 private_trap = true（避免重复添加）
+            if ! grep -q "private_trap = true" "$DROsera_TOML"; then
+                echo "private_trap = true" >> "$DROsera_TOML"
+                echo "已添加 private_trap = true 到 drosera.toml"
+            fi
         else
-        echo "未找到空的 whitelist = []，尝试追加..."
-        echo "whitelist = [\"$WALLET_ADDRESS\"]" >> "$DROsera_TOML"
-        echo "已添加 whitelist = [\"$WALLET_ADDRESS\"] 到 drosera.toml"
-        fi
-        # 添加 private_trap = true（避免重复添加）
-        if ! grep -q "private_trap = true" "$DROsera_TOML"; then
-        echo "private_trap = true" >> "$DROsera_TOML"
-        echo "已添加 private_trap = true 到 drosera.toml"
-        fi
-        else
-        echo "错误：drosera.toml 未找到（$DROsera_TOML）"
-        exit 1
+            echo "错误：drosera.toml 未找到（$DROsera_TOML）"
+            exit 1
         fi
 
         # 执行第二次 drosera apply
@@ -201,7 +211,18 @@ function install_drosera_node() {
             echo "第二次 drosera apply 将复用第一次输入的私钥：${DROSERA_PRIVATE_KEY:0:10}..."
             echo "正在执行第二次 drosera apply..."
             cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-            DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
+            # 尝试执行 drosera apply，最多重试 3 次，每次等待 10 秒
+            MAX_RETRIES=3
+            RETRY_COUNT=0
+            until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply; do
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+                    echo "第二次 drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key drosera apply' 或检查冷却期。"
+                    exit 1
+                fi
+                echo "第二次 drosera apply 失败，可能由于冷却期未结束。等待 10 秒后重试（第 $RETRY_COUNT 次）..."
+                sleep 10
+            done
             echo "第二次 drosera apply 完成"
         fi
 
@@ -292,6 +313,7 @@ function install_drosera_node() {
 
         # 清理私钥变量
         unset DROSERA_PRIVATE_KEY
+ Захвата данных завершена
         echo "私钥变量已清理"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
