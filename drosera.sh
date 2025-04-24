@@ -231,6 +231,8 @@ function install_drosera_node() {
         cd ~ || { echo "切换到主目录失败"; exit 1; }
         curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
         tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "Drosera Operator 解压失败"; exit 1; }
+        rm -f drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "删除 Drosera Operator 压缩包失败"; exit 1; }
+        echo "Drosera Operator 安装完成，压缩包已删除"
         echo "Drosera Operator 安装完成"
 
         # 测试 Drosera Operator
