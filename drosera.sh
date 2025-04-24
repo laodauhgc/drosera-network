@@ -2,6 +2,7 @@
 
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
+SCRIPT_PATH="$HOME/Drosera.sh"
 
 # 确保以 root 权限运行
 if [ "$EUID" -ne 0 ]; then
@@ -187,20 +188,14 @@ function install_drosera_node() {
             exit 1
         fi
 
-        sleep 10
-
         # 执行第二次 drosera apply
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-        echo "错误：未提供私钥，第二次 drosera apply 将跳过"
-        exit 1
+            echo "错误：未提供私钥，第二次 drosera apply 将跳过"
         else
-        echo "正在执行第二次 drosera apply..."
-        echo "调试：DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY"
-        cd /root/my-drosera-trap || { echo "无法切换到 /root/my-drosera-trap 目录"; exit 1; }
-        export DROSERA_PRIVATE_KEY
-        echo "ofc" | drosera apply --verbose > drosera_apply.log 2>&1 || { echo "第二次 drosera apply 失败，查看 drosera_apply.log"; cat drosera_apply.log; exit 1; }
-        echo "第二次 drosera apply 完成"
-        unset DROSERA_PRIVATE_KEY # 清除变量以提高安全性
+            echo "正在执行第二次 drosera apply..."
+            cd /root/my-drosera-trap
+            DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY echo "ofc" | drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
+            echo "第二次 drosera apply 完成"
         fi
 
         # 切换到主目录并安装 Drosera Operator
@@ -233,6 +228,15 @@ function install_drosera_node() {
             drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key $DROSERA_PRIVATE_KEY || { echo "Drosera Operator 注册失败"; exit 1; }
             echo "Drosera Operator 注册完成"
         fi
+
+        # 配置并启用防火墙
+        echo "正在配置并启用防火墙..."
+        ufw allow ssh
+        ufw allow 22
+        ufw allow 31313/tcp
+        ufw allow 31314/tcp
+        ufw enable
+        echo "防火墙已启用，允许 SSH 和 Drosera 端口"
 
         # 检查并停止 drosera 服务
         echo "正在检查 drosera 服务状态..."
