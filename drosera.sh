@@ -211,8 +211,8 @@ function install_drosera_node() {
             echo "第二次 drosera apply 将复用第一次输入的私钥：${DROSERA_PRIVATE_KEY:0:10}..."
             echo "正在执行第二次 drosera apply..."
             cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-            # 尝试执行 drosera apply，最多重试 3 次，每次等待 10 秒
-            MAX_RETRIES=3
+            # 尝试执行 drosera apply，最多重试 5 次，每次等待 10 秒
+            MAX_RETRIES=5
             RETRY_COUNT=0
             until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply; do
                 RETRY_COUNT=$((RETRY_COUNT + 1))
