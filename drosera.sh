@@ -2,7 +2,6 @@
 
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
-SCRIPT_PATH="$HOME/Drosera.sh"
 
 # 确保以 root 权限运行
 if [ "$EUID" -ne 0 ]; then
