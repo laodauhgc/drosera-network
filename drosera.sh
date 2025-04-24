@@ -306,6 +306,25 @@ function view_logs() {
     read -r
 }
 
+# 命令3：重启 Operators
+function restart_operators() {
+    echo "正在重启 Operators..."
+    cd ~/Drosera-Network || { echo "切换到 Drosera-Network 目录失败"; exit 1; }
+    if command -v docker-compose &> /dev/null; then
+        echo "使用 docker-compose 重启服务..."
+        docker-compose up -d || { echo "Docker Compose 服务重启失败"; exit 1; }
+    elif docker compose version &> /dev/null; then
+        echo "使用 docker compose 重启服务..."
+        docker compose up -d || { echo "Docker Compose 服务重启失败"; exit 1; }
+    else
+        echo "错误：未找到 docker-compose 或 docker compose 命令"
+        exit 1
+    fi
+    echo "Operators 重启完成"
+    echo "按任意键返回主菜单..."
+    read -r
+}
+
 # 主菜单函数
 function main_menu() {
     while true; do
@@ -314,15 +333,17 @@ function main_menu() {
         echo "如有问题，可联系推特，仅此只有一个号"
         echo "================================================================"
         echo "退出脚本，请按键盘 ctrl + C 退出即可"
-.support/ask_grok.sh        echo "请选择要执行的操作:"
+        echo "请选择要执行的操作:"
         echo "1. 安装 Drosera 节点"
         echo "2. 查看日志"
-        echo -n "请输入选项 (1-2): "
+        echo "3. 重启 Operators"
+        echo -n "请输入选项 (1-3): "
         read choice
         case $choice in
             1) install_drosera_node ;;
             2) view_logs ;;
-            *) echo "无效选项，请输入 1 或 2" ; sleep 2 ;;
+            3) restart_operators ;;
+            *) echo "无效选项，请输入 1、2 或 3" ; sleep 2 ;;
         esac
     done
 }
