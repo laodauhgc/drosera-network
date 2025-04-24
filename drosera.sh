@@ -175,20 +175,23 @@ function install_drosera_node() {
         # 检查 drosera.toml 是否存在
         DROsera_TOML="/root/my-drosera-trap/drosera.toml"
         if [ -f "$DROsera_TOML" ]; then
-            # 修改 whitelist
-            if grep -q "wh tect-list = \[\]" "$DROsera_TOML"; then
-                sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
-                echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
-            else
-                echo "错误：drosera.toml 中未找到 'whitelist = []'"
-                exit 1
-            fi
-            # 添加 private_trap = true
-            echo "private_trap = true" >> "$DROsera_TOML"
-            echo "已添加 private_trap = true 到 drosera.toml"
+        # 检查是否包含 whitelist 字段（宽松匹配）
+        if grep -q "[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]" "$DROsera_TOML"; then
+        sed -i "s/[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
+        echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
         else
-            echo "错误：drosera.toml 未找到（$DROsera_TOML）"
-            exit 1
+        echo "未找到空的 whitelist = []，尝试追加..."
+        echo "whitelist = [\"$WALLET_ADDRESS\"]" >> "$DROsera_TOML"
+        echo "已添加 whitelist = [\"$WALLET_ADDRESS\"] 到 drosera.toml"
+        fi
+        # 添加 private_trap = true（避免重复添加）
+        if ! grep -q "private_trap = true" "$DROsera_TOML"; then
+        echo "private_trap = true" >> "$DROsera_TOML"
+        echo "已添加 private_trap = true 到 drosera.toml"
+        fi
+        else
+        echo "错误：drosera.toml 未找到（$DROsera_TOML）"
+        exit 1
         fi
 
         # 执行第二次 drosera apply
