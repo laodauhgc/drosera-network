@@ -211,8 +211,8 @@ function install_drosera_node() {
             echo "第二次 drosera apply 将复用第一次输入的私钥：${DROSERA_PRIVATE_KEY:0:10}..."
             echo "正在执行第二次 drosera apply..."
             cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-            # 尝试执行 drosera apply，最多重试 5 次，每次等待 10 秒
-            MAX_RETRIES=5
+            # 尝试执行 drosera apply，最多重试 3 次，每次等待 300 秒
+            MAX_RETRIES=3
             RETRY_COUNT=0
             until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply; do
                 RETRY_COUNT=$((RETRY_COUNT + 1))
@@ -220,8 +220,8 @@ function install_drosera_node() {
                     echo "第二次 drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key drosera apply' 或检查冷却期。"
                     exit 1
                 fi
-                echo "第二次 drosera apply 失败，可能由于冷却期未结束。等待 10 秒后重试（第 $RETRY_COUNT 次）..."
-                sleep 10
+                echo "第二次 drosera apply 失败，可能由于冷却期未结束。等待 300 秒后重试（第 $RETRY_COUNT 次）..."
+                sleep 300
             done
             echo "第二次 drosera apply 完成"
         fi
