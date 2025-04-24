@@ -191,12 +191,16 @@ function install_drosera_node() {
 
         # 执行第二次 drosera apply
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-            echo "错误：未提供私钥，第二次 drosera apply 将跳过"
+        echo "错误：未提供私钥，第二次 drosera apply 将跳过"
+        exit 1
         else
-            echo "正在执行第二次 drosera apply..."
-            cd /root/my-drosera-trap
-            DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY echo "ofc" | drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
-            echo "第二次 drosera apply 完成"
+        echo "正在执行第二次 drosera apply..."
+        echo "调试：DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY"
+        cd /root/my-drosera-trap || { echo "无法切换到 /root/my-drosera-trap 目录"; exit 1; }
+        export DROSERA_PRIVATE_KEY
+        echo "ofc" | drosera apply --verbose > drosera_apply.log 2>&1 || { echo "第二次 drosera apply 失败，查看 drosera_apply.log"; cat drosera_apply.log; exit 1; }
+        echo "第二次 drosera apply 完成"
+        unset DROSERA_PRIVATE_KEY # 清除变量以提高安全性
         fi
 
         # 切换到主目录并安装 Drosera Operator
