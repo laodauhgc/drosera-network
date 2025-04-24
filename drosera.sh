@@ -231,15 +231,6 @@ function install_drosera_node() {
             echo "Drosera Operator 注册完成"
         fi
 
-        # 配置并启用防火墙
-        echo "正在配置并启用防火墙..."
-        ufw allow ssh
-        ufw allow 22
-        ufw allow 31313/tcp
-        ufw allow 31314/tcp
-        ufw enable
-        echo "防火墙已启用，允许 SSH 和 Drosera 端口"
-
         # 检查并停止 drosera 服务
         echo "正在检查 drosera 服务状态..."
         if systemctl is-active --quiet drosera; then
