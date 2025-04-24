@@ -280,12 +280,21 @@ function install_drosera_node() {
 
         # 启动 Docker Compose 服务
         echo "正在启动 Docker Compose 服务..."
-        docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        if command -v docker-compose &> /dev/null; then
+            echo "使用 docker-compose 启动服务..."
+            docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        elif docker compose version &> /dev/null; then
+            echo "使用 docker compose 启动服务..."
+            docker compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        else
+            echo "错误：未找到 docker-compose 或 docker compose 命令"
+            exit 1
+        fi
         echo "Docker Compose 服务启动完成"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
         return
-    fi
+        fi
 
     echo "Drosera 节点安装和配置完成！"
     echo "按任意键返回主菜单..."
