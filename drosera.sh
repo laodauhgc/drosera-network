@@ -2,7 +2,6 @@
 
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
-SCRIPT_PATH="$HOME/Drosera.sh"
 
 # 确保以 root 权限运行
 if [ "$EUID" -ne 0 ]; then
@@ -41,8 +40,8 @@ function install_drosera_node() {
     fi
 
     # 启动并启用 Docker 服务
-    systemctl start docker
-    systemctl enable docker
+    systemctl start docker || { echo "Docker 服务启动失败"; exit 1; }
+    systemctl enable docker || { echo "Docker 服务启用失败"; exit 1; }
 
     # 检查 Docker Compose 是否安装
     if ! command -v docker-compose &> /dev/null; then
@@ -64,6 +63,7 @@ function install_drosera_node() {
     if [ -f "$BUN_BIN" ]; then
         echo "Bun 安装完成"
         export PATH=$PATH:/root/.bun/bin
+        echo 'export PATH=$PATH:/root/.bun/bin' >> /root/.bashrc
     else
         echo "Bun 安装失败，请检查网络或 https://bun.sh/install"
         exit 1
@@ -75,6 +75,7 @@ function install_drosera_node() {
     if [ -f "/root/.foundry/bin/foundryup" ]; then
         /root/.foundry/bin/foundryup
         export PATH=$PATH:/root/.foundry/bin
+        echo 'export PATH=$PATH:/root/.foundry/bin' >> /root/.bashrc
         forge --version || { echo "forge 未安装"; exit 1; }
         echo "Foundry 安装完成"
     else
@@ -87,6 +88,7 @@ function install_drosera_node() {
     curl -L https://app.drosera.io/install | bash || { echo "Drosera 安装失败"; exit 1; }
     source /root/.bashrc
     export PATH=$PATH:/root/.drosera/bin
+    echo 'export PATH=$PATH:/root/.drosera/bin' >> /root/.bashrc
     if command -v droseraup &> /dev/null; then
         droseraup || { echo "droseraup 执行失败"; exit 1; }
         echo "Drosera 安装完成"
@@ -117,12 +119,12 @@ function install_drosera_node() {
 
     # 创建 my-drosera-trap 目录并切换
     echo "创建 my-drosera-trap 目录并切换..."
-    mkdir -p /root/my-drosera-trap && cd /root/my-drosera-trap
+    mkdir -p /root/my-drosera-trap && cd /root/my-drosera-trap || { echo "目录创建或切换失败"; exit 1; }
 
     # 配置 Git 用户信息
     echo "配置 Git 用户信息..."
-    git config --global user.email "1"
-    git config --global user.name "1"
+    git config --global user.email "1" || { echo "Git 配置失败"; exit 1; }
+    git config --global user.name "1" || { echo "Git 配置失败"; exit 1; }
 
     # 初始化 Foundry 模板
     echo "初始化 Foundry 模板..."
@@ -146,10 +148,9 @@ function install_drosera_node() {
     if [ -z "$DROSERA_PRIVATE_KEY" ]; then
         echo "错误：未提供私钥，drosera apply 将跳过"
     else
-        echo "正在执行 drosera apply..."
-        export DROSERA_PRIVATE_KEY
-        echo "ofc" | drosera apply || { echo "drosera apply 失败"; exit 1; }
-        echo "drosera apply 完成"
+        echo "正在执行第一次 drosera apply..."
+        DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
+        echo "第一次 drosera apply 完成"
     fi
 
     # 询问用户是否继续进行下一步
@@ -157,7 +158,7 @@ function install_drosera_node() {
     read -r CONTINUE
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
         echo "正在执行 drosera dryrun..."
-        cd /root/my-drosera-trap
+        cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
         drosera dryrun || { echo "drosera dryrun 失败"; exit 1; }
         echo "drosera dryrun 完成"
 
@@ -173,7 +174,7 @@ function install_drosera_node() {
         DROsera_TOML="/root/my-drosera-trap/drosera.toml"
         if [ -f "$DROsera_TOML" ]; then
             # 修改 whitelist
-            if grep -q "whitelist = \[\]" "$DROsera_TOML"; then
+            if grep -q "wh tect-list = \[\]" "$DROsera_TOML"; then
                 sed -i "s/whitelist = \[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
                 echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
             else
@@ -192,15 +193,16 @@ function install_drosera_node() {
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：未提供私钥，第二次 drosera apply 将跳过"
         else
+            echo "第二次 drosera apply 将复用第一次输入的私钥：${DROSERA_PRIVATE_KEY:0:10}..."
             echo "正在执行第二次 drosera apply..."
-            cd /root/my-drosera-trap
-            DROSERA_PRIVATE_KEY=$DROSERA_PRIVATE_KEY echo "ofc" | drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
+            cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
+            DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply || { echo "第二次 drosera apply 失败"; exit 1; }
             echo "第二次 drosera apply 完成"
         fi
 
         # 切换到主目录并安装 Drosera Operator
         echo "切换到主目录并安装 Drosera Operator..."
-        cd ~
+        cd ~ || { echo "切换到主目录失败"; exit 1; }
         curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
         tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "Drosera Operator 解压失败"; exit 1; }
         echo "Drosera Operator 安装完成"
@@ -225,7 +227,7 @@ function install_drosera_node() {
             echo "错误：未提供私钥，drosera-operator register 将跳过"
         else
             echo "正在运行 Drosera Operator 注册..."
-            drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key $DROSERA_PRIVATE_KEY || { echo "Drosera Operator 注册失败"; exit 1; }
+            drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key "$DROSERA_PRIVATE_KEY" || { echo "Drosera Operator 注册失败"; exit 1; }
             echo "Drosera Operator 注册完成"
         fi
 
@@ -256,7 +258,7 @@ function install_drosera_node() {
 
         # 切换到 Drosera-Network 目录并复制 .env 文件
         echo "切换到 Drosera-Network 目录并复制 .env 文件..."
-        cd Drosera-Network
+        cd Drosera-Network || { echo "切换到 Drosera-Network 失败"; exit 1; }
         cp .env.example .env || { echo ".env 文件复制失败"; exit 1; }
         echo ".env 文件复制完成"
 
@@ -291,10 +293,14 @@ function install_drosera_node() {
             exit 1
         fi
         echo "Docker Compose 服务启动完成"
+
+        # 清理私钥变量
+        unset DROSERA_PRIVATE_KEY
+        echo "私钥变量已清理"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
         return
-        fi
+    fi
 
     echo "Drosera 节点安装和配置完成！"
     echo "按任意键返回主菜单..."
@@ -317,7 +323,7 @@ function main_menu() {
         echo "如有问题，可联系推特，仅此只有一个号"
         echo "================================================================"
         echo "退出脚本，请按键盘 ctrl + C 退出即可"
-        echo "请选择要执行的操作:"
+.support/ask_grok.sh        echo "请选择要执行的操作:"
         echo "1. 安装 Drosera 节点"
         echo "2. 查看日志"
         echo -n "请输入选项 (1-2): "
