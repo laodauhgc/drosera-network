@@ -311,11 +311,15 @@ function restart_operators() {
     echo "正在重启 Operators..."
     cd ~/Drosera-Network || { echo "切换到 Drosera-Network 目录失败"; exit 1; }
     if command -v docker-compose &> /dev/null; then
-        echo "使用 docker-compose 重启服务..."
-        docker-compose up -d || { echo "Docker Compose 服务重启失败"; exit 1; }
+        echo "使用 docker-compose 停止服务..."
+        docker-compose down || { echo "Docker Compose 服务停止失败"; exit 1; }
+        echo "使用 docker-compose 启动服务..."
+        docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
     elif docker compose version &> /dev/null; then
-        echo "使用 docker compose 重启服务..."
-        docker compose up -d || { echo "Docker Compose 服务重启失败"; exit 1; }
+        echo "使用 docker compose 停止服务..."
+        docker compose down || { echo "Docker Compose 服务停止失败"; exit 1; }
+        echo "使用 docker compose 启动服务..."
+        docker compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
     else
         echo "错误：未找到 docker-compose 或 docker compose 命令"
         exit 1
