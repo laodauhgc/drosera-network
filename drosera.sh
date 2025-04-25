@@ -281,15 +281,15 @@ function install_drosera_node() {
         cp .env.example .env || { echo ".env 文件复制失败"; exit 1; }
         echo ".env 文件复制完成"
 
-        # 提示用户输入服务器 IP 并写入 .env
-        echo "请输入服务器公网 IP 地址（用于 .env 的 VPS_IP）："
-        read SERVER_IP
-        if [ -z "$SERVER_IP" ]; then
-            echo "错误：未提供服务器 IP"
-            exit 1
+        # 自动获取服务器公网 IP 并写入 .env
+        echo "正在自动获取服务器公网 IP 地址..."
+        SERVER_IP=\$(curl -s https://api.ipify.org)
+        if [ -z "\$SERVER_IP" ]; then
+        echo "错误：无法获取服务器公网 IP，请检查网络连接"
+        exit 1
         fi
-        sed -i "s/VPS_IP=.*/VPS_IP=$SERVER_IP/" .env
-        echo "已更新 .env 的 VPS_IP 为 $SERVER_IP"
+        sed -i "s/VPS_IP=.*/VPS_IP=\$SERVER_IP/" .env
+        echo "已更新 .env 的 VPS_IP 为 \$SERVER_IP"
 
         # 写入 ETH_PRIVATE_KEY 到 .env
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
