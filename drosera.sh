@@ -283,13 +283,13 @@ function install_drosera_node() {
 
         # 自动获取服务器公网 IP 并写入 .env
         echo "正在自动获取服务器公网 IP 地址..."
-        SERVER_IP=\$(curl -s https://api.ipify.org)
-        if [ -z "\$SERVER_IP" ]; then
-        echo "错误：无法获取服务器公网 IP，请检查网络连接"
-        exit 1
+        SERVER_IP=$(curl -s https://api.ipify.org)
+        if [ -z "$SERVER_IP" ]; then
+            echo "错误：无法获取服务器公网 IP，请检查网络连接"
+            exit 1
         fi
-        sed -i "s/VPS_IP=.*/VPS_IP=\$SERVER_IP/" .env
-        echo "已更新 .env 的 VPS_IP 为 \$SERVER_IP"
+        sed -i "s/VPS_IP=.*/VPS_IP=$SERVER_IP/" .env
+        echo "已更新 .env 的 VPS_IP 为 $SERVER_IP"
 
         # 写入 ETH_PRIVATE_KEY 到 .env
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
@@ -315,7 +315,6 @@ function install_drosera_node() {
 
         # 清理私钥变量
         unset DROSERA_PRIVATE_KEY
- Захвата данных завершена
         echo "私钥变量已清理"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
