@@ -275,6 +275,22 @@ function install_drosera_node() {
         git clone https://github.com/sdohuajia/Drosera-Network.git || { echo "Drosera-Network 仓库拉取失败"; exit 1; }
         echo "Drosera-Network 仓库拉取完成"
 
+        # 输入 CPU 核心数
+        echo "请输入分配给 Drosera 节点的 CPU 核心数（例如 2 或 2.5，输入 0 表示不限制）："
+        read CPU_CORES
+
+        # 获取系统可用核心数
+        AVAILABLE_CORES=$(nproc)
+
+        # 验证输入
+        if [[ ! "$CPU_CORES" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "$(echo "$CPU_CORES <= 0" | bc)" -eq 1 ] && [ "$CPU_CORES" != "0" ]; then
+            echo "错误：请输入一个有效的正数或 0（0 表示不限制）"
+            exit 1
+        elif [ "$(echo "$CPU_CORES > $AVAILABLE_CORES" | bc)" -eq 1 ]; then
+            echo "错误：输入的核心数 ($CPU_CORES) 超过系统可用核心数 ($AVAILABLE_CORES)"
+            exit 1
+        fi
+
         # 切换到 Drosera-Network 目录并复制 .env 文件
         echo "切换到 Drosera-Network 目录并复制 .env 文件..."
         cd Drosera-Network || { echo "切换到 Drosera-Network 失败"; exit 1; }
@@ -299,14 +315,39 @@ function install_drosera_node() {
             echo "已更新 .env 的 ETH_PRIVATE_KEY"
         fi
 
+        # 修改 docker-compose.yaml 以动态设置 CPU 限制
+        echo "正在配置 docker-compose.yaml 以限制 CPU 核心数..."
+        if [ ! -f "docker-compose.yaml" ]; then
+            echo "错误：未找到 docker-compose.yaml 文件，请确保 Drosera-Network 仓库包含该文件"
+            exit 1
+        fi
+        if [ "$CPU_CORES" != "0" ]; then
+            # 检查是否已有 cpus 配置，动态添加或修改
+            if grep -A 10 "drosera-node:" docker-compose.yaml | grep -q "cpus:"; then
+                sed -i "/drosera-node:/,/^[^ ]/ s/cpus: .*/cpus: $CPU_CORES/" docker-compose.yaml
+            else
+                # 在 drosera-node 服务下添加 cpus 配置（缩进 4 空格）
+                sed -i "/drosera-node:/a\    cpus: $CPU_CORES" docker-compose.yaml
+            fi
+            echo "已设置 drosera-node 的 CPU 限制为 $CPU_CORES 核心"
+        else
+            # 如果输入 0，移除 cpus 配置（若存在）
+            if grep -A 10 "drosera-node:" docker-compose.yaml | grep -q "cpus:"; then
+                sed -i "/drosera-node:/,/^[^ ]/ {/^    cpus: .*/d}" docker-compose.yaml
+                echo "已移除 drosera-node 的 CPU 限制"
+            else
+                echo "未设置 CPU 核心数限制，将使用默认配置"
+            fi
+        fi
+
         # 启动 Docker Compose 服务
         echo "正在启动 Docker Compose 服务..."
         if command -v docker-compose &> /dev/null; then
             echo "使用 docker-compose 启动服务..."
-            docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
         elif docker compose version &> /dev/null; then
             echo "使用 docker compose 启动服务..."
-            docker compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
         else
             echo "错误：未找到 docker-compose 或 docker compose 命令"
             exit 1
@@ -340,14 +381,14 @@ function restart_operators() {
     cd ~/Drosera-Network || { echo "切换到 Drosera-Network 目录失败"; exit 1; }
     if command -v docker-compose &> /dev/null; then
         echo "使用 docker-compose 停止服务..."
-        docker-compose down || { echo "Docker Compose 服务停止失败"; exit 1; }
+        docker-compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
         echo "使用 docker-compose 启动服务..."
-        docker-compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
     elif docker compose version &> /dev/null; then
         echo "使用 docker compose 停止服务..."
-        docker compose down || { echo "Docker Compose 服务停止失败"; exit 1; }
+        docker compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
         echo "使用 docker compose 启动服务..."
-        docker compose up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
     else
         echo "错误：未找到 docker-compose 或 docker compose 命令"
         exit 1
