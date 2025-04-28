@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 确保 PATH 包含 Drosera
-export PATH=$PATH:/root/.drosera/bin
+# 确保 PATH 包含 Drosera 和其他工具
+export PATH=$PATH:/root/.drosera/bin:/root/.bun/bin:/root/.foundry/bin
 
 # 脚本保存路径
 SCRIPT_PATH="$HOME/Drosera.sh"
@@ -20,7 +20,7 @@ function install_drosera_node() {
     apt-get install -y curl ufw iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip || { echo "依赖安装失败"; exit 1; }
     echo "依赖安装完成"
 
-    # 检查 jq 是否安装
+    # 检查并安装 jq
     if ! command -v jq &> /dev/null; then
         echo "jq 未安装，正在安装..."
         apt-get install -y jq || { echo "jq 安装失败"; exit 1; }
@@ -30,7 +30,7 @@ function install_drosera_node() {
         apt-get install -y jq
     fi
 
-    # 检查 Docker 是否安装
+    # 检查并安装 Docker
     if ! command -v docker &> /dev/null; then
         echo "Docker 未安装，正在安装..."
         apt-get install -y apt-transport-https ca-certificates curl software-properties-common
@@ -48,12 +48,15 @@ function install_drosera_node() {
     systemctl start docker || { echo "Docker 服务启动失败"; exit 1; }
     systemctl enable docker || { echo "Docker 服务启用失败"; exit 1; }
 
-    # 检查 Docker Compose 是否安装
-    if ! command -v docker-compose &> /dev/null; then
+    # 检查并安装 Docker Compose
+    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
         echo "Docker Compose 未安装，正在安装最新版本..."
         curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
-        docker-compose --version || { echo "Docker Compose 安装失败"; exit 1; }
+        if ! docker-compose --version &> /dev/null; then
+            echo "Docker Compose 安装失败"
+            exit 1
+        fi
         echo "Docker Compose 安装完成"
     else
         echo "Docker Compose 已安装，检查更新..."
@@ -63,12 +66,9 @@ function install_drosera_node() {
 
     # 安装 Bun
     echo "正在安装 Bun..."
-    echo "正在检查并安装 unzip..."
     if ! command -v unzip &> /dev/null; then
         apt-get install -y unzip || { echo "unzip 安装失败"; exit 1; }
         echo "unzip 安装完成"
-    else
-        echo "unzip 已安装"
     fi
     curl -fsSL https://bun.sh/install | bash || { echo "Bun 安装失败"; exit 1; }
     BUN_BIN="/root/.bun/bin/bun"
@@ -120,23 +120,14 @@ function install_drosera_node() {
         exit 1
     fi
 
-    # 运行 droseraup（确保最新版本）
-    if command -v droseraup &> /dev/null; then
-        echo "正在运行 droseraup..."
-        droseraup || { echo "droseraup 执行失败"; exit 1; }
-    else
-        echo "droseraup 命令未找到"
-        exit 1
-    fi
-
     # 创建 my-drosera-trap 目录并切换
     echo "创建 my-drosera-trap 目录并切换..."
     mkdir -p /root/my-drosera-trap && cd /root/my-drosera-trap || { echo "目录创建或切换失败"; exit 1; }
 
     # 配置 Git 用户信息
     echo "配置 Git 用户信息..."
-    git config --global user.email "1" || { echo "Git 配置失败"; exit 1; }
-    git config --global user.name "1" || { echo "Git 配置失败"; exit 1; }
+    git config --global user.email "user@example.com" || { echo "Git 配置失败"; exit 1; }
+    git config --global user.name "DroseraUser" || { echo "Git 配置失败"; exit 1; }
 
     # 初始化 Foundry 模板
     echo "初始化 Foundry 模板..."
@@ -156,7 +147,7 @@ function install_drosera_node() {
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     echo "请输入 EVM 钱包私钥："
-    read DROSERA_PRIVATE_KEY
+    read -s DROSERA_PRIVATE_KEY
     if [ -z "$DROSERA_PRIVATE_KEY" ]; then
         echo "错误：未提供私钥，drosera apply 将跳过"
     else
@@ -182,10 +173,9 @@ function install_drosera_node() {
             exit 1
         fi
 
-        # 检查 drosera.toml 是否存在
+        # 修改 drosera.toml
         DROsera_TOML="/root/my-drosera-trap/drosera.toml"
         if [ -f "$DROsera_TOML" ]; then
-            # 检查是否包含 whitelist 字段（宽松匹配）
             if grep -q "[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]" "$DROsera_TOML"; then
                 sed -i "s/[[:space:]]*whitelist[[:space:]]*=[[:space:]]*\[\]/whitelist = [\"$WALLET_ADDRESS\"]/g" "$DROsera_TOML"
                 echo "已更新 drosera.toml 的 whitelist 为 [\"$WALLET_ADDRESS\"]"
@@ -194,8 +184,7 @@ function install_drosera_node() {
                 echo "whitelist = [\"$WALLET_ADDRESS\"]" >> "$DROsera_TOML"
                 echo "已添加 whitelist = [\"$WALLET_ADDRESS\"] 到 drosera.toml"
             fi
-            # 添加 private_trap = true（避免重复添加）
-            if ! grepiedad -q "private_trap = true" "$DROsera_TOML"; then
+            if ! grep -q "private_trap = true" "$DROsera_TOML"; then
                 echo "private_trap = true" >> "$DROsera_TOML"
                 echo "已添加 private_trap = true 到 drosera.toml"
             fi
@@ -208,10 +197,8 @@ function install_drosera_node() {
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：未提供私钥，第二次 drosera apply 将跳过"
         else
-            echo "第二次 drosera apply 将复用第一次输入的私钥：${DROSERA_PRIVATE_KEY:0:10}..."
             echo "正在执行第二次 drosera apply..."
             cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-            # 尝试执行 drosera apply，最多重试 3 次，每次等待 300 秒
             MAX_RETRIES=3
             RETRY_COUNT=0
             until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply; do
@@ -226,13 +213,12 @@ function install_drosera_node() {
             echo "第二次 drosera apply 完成"
         fi
 
-        # 切换到主目录并安装 Drosera Operator
+        # 安装 Drosera Operator
         echo "切换到主目录并安装 Drosera Operator..."
         cd ~ || { echo "切换到主目录失败"; exit 1; }
         curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
         tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "Drosera Operator 解压失败"; exit 1; }
         rm -f drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz || { echo "删除 Drosera Operator 压缩包失败"; exit 1; }
-        echo "Drosera Operator 安装完成，压缩包已删除"
         echo "Drosera Operator 安装完成"
 
         # 测试 Drosera Operator
@@ -245,7 +231,7 @@ function install_drosera_node() {
         cp drosera-operator /usr/bin || { echo "复制 Drosera Operator 失败"; exit 1; }
         echo "Drosera Operator 已成功复制到 /usr/bin"
 
-        # 拉取 Drosera Operator 的最新 Docker 镜像
+        # 拉取 Drosera Operator 的 Docker 镜像
         echo "正在拉取 Drosera Operator 的最新 Docker 镜像..."
         docker pull ghcr.io/drosera-network/drosera-operator:latest || { echo "Drosera Operator Docker 镜像拉取失败"; exit 1; }
         echo "Drosera Operator Docker 镜像拉取完成"
@@ -325,15 +311,21 @@ function install_drosera_node() {
             echo "错误：未找到 docker-compose.yaml 文件，请确保 Drosera-Network 仓库包含该文件"
             exit 1
         fi
+
+        # 备份 docker-compose.yaml
+        cp docker-compose.yaml docker-compose.yaml.bak
+        echo "已备份 docker-compose.yaml 到 docker-compose.yaml.bak"
+
+        # 处理 cpuset 配置
         if [ "$CPU_CORES" != "0" ]; then
-            # 计算 cpuset 值（例如输入 4 -> cpuset: "1-4"）
             CPUSET="1-$CPU_CORES"
-            # 检查是否已有 cpuset 配置，动态添加或修改
+            # 检查是否已有 cpuset 配置
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
+                # 替换现有 cpuset 配置
                 sed -i "/drosera:/,/^[^ ]/ s/cpuset: .*/cpuset: \"$CPUSET\"/" docker-compose.yaml
             else
-                # 在 drosera 服务下添加 cpuset 配置（缩进 2 空格）
-                sed -i "/drosera:/a\  cpuset: \"$CPUSET\"" docker-compose.yaml
+                # 在 drosera 服务下添加 cpuset 配置（确保缩进为 2 空格）
+                awk '/drosera:/ {print; print "  cpuset: \""'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml
             fi
             echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
@@ -342,14 +334,26 @@ function install_drosera_node() {
                 sed -i "/drosera:/,/^[^ ]/ {/^  cpuset: .*/d}" docker-compose.yaml
                 echo "已移除 drosera 服务的 CPU 核心绑定"
             else
-                echo "未设置 CPU 核心绑定，将使用默认配置"
+                echo "未设置 CPU 核心绑定，将使用 h默认配置"
             fi
         fi
+
+        # 验证 docker-compose.yaml 的语法
+        echo "正在验证 docker-compose.yaml 的语法..."
+        if command -v docker-compose &> /dev/null; then
+            docker-compose -f docker-compose.yaml config || { echo "docker-compose.yaml 语法错误，请检查文件"; exit 1; }
+        elif docker compose version &> /dev/null; then
+            docker compose -f docker-compose.yaml config || { echo "docker-compose.yaml 语法错误，请检查文件"; exit 1; }
+        else
+            echo "错误：未找到 docker-compose 或 docker compose 命令"
+            exit 1
+        fi
+        echo "docker-compose.yaml 语法验证通过"
 
         # 启动 Docker Compose 服务
         echo "正在启动 Docker Compose 服务..."
         if command -v docker-compose &> /dev/null; then
-            echo "使用 docker-compose 启动服务..."
+            echo "使用手动 docker-compose 启动服务..."
             docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
         elif docker compose version &> /dev/null; then
             echo "使用 docker compose 启动服务..."
@@ -365,6 +369,7 @@ function install_drosera_node() {
         echo "私钥变量已清理"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
+        unset DROSERA_PRIVATE_KEY
         return
     fi
 
