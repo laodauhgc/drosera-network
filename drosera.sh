@@ -195,7 +195,7 @@ function install_drosera_node() {
                 echo "已添加 whitelist = [\"$WALLET_ADDRESS\"] 到 drosera.toml"
             fi
             # 添加 private_trap = true（避免重复添加）
-            if ! grep -q "private_trap = true" "$DROsera_TOML"; then
+            if ! grepiedad -q "private_trap = true" "$DROsera_TOML"; then
                 echo "private_trap = true" >> "$DROsera_TOML"
                 echo "已添加 private_trap = true 到 drosera.toml"
             fi
@@ -275,19 +275,23 @@ function install_drosera_node() {
         git clone https://github.com/sdohuajia/Drosera-Network.git || { echo "Drosera-Network 仓库拉取失败"; exit 1; }
         echo "Drosera-Network 仓库拉取完成"
 
+        # 获取机器核心数
+        AVAILABLE_CORES=$(nproc)
+        echo "检测到机器有 $AVAILABLE_CORES 个 CPU 核心"
+
         # 输入 CPU 核心数
-        echo "请输入分配给 Drosera 节点的 CPU 核心数（例如 2 或 2.5，输入 0 表示不限制）："
+        echo "请输入要使用的 CPU 核心数（例如 4 表示使用核心 1-4，$AVAILABLE_CORES 表示核心 1-$AVAILABLE_CORES，输入 0 表示不限制）："
         read CPU_CORES
 
-        # 获取系统可用核心数
-        AVAILABLE_CORES=$(nproc)
-
         # 验证输入
-        if [[ ! "$CPU_CORES" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "$(echo "$CPU_CORES <= 0" | bc)" -eq 1 ] && [ "$CPU_CORES" != "0" ]; then
-            echo "错误：请输入一个有效的正数或 0（0 表示不限制）"
+        if [[ ! "$CPU_CORES" =~ ^[0-9]+$ ]]; then
+            echo "错误：请输入一个正整数或 0（0 表示不限制）"
             exit 1
-        elif [ "$(echo "$CPU_CORES > $AVAILABLE_CORES" | bc)" -eq 1 ]; then
+        elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -gt "$AVAILABLE_CORES" ]; then
             echo "错误：输入的核心数 ($CPU_CORES) 超过系统可用核心数 ($AVAILABLE_CORES)"
+            exit 1
+        elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -lt 1 ]; then
+            echo "错误：核心数必须为正整数或 0"
             exit 1
         fi
 
@@ -315,28 +319,30 @@ function install_drosera_node() {
             echo "已更新 .env 的 ETH_PRIVATE_KEY"
         fi
 
-        # 修改 docker-compose.yaml 以动态设置 CPU 限制
-        echo "正在配置 docker-compose.yaml 以限制 CPU 核心数..."
+        # 修改 docker-compose.yaml 以动态设置 CPU 核心绑定
+        echo "正在配置 docker-compose.yaml 以绑定 CPU 核心..."
         if [ ! -f "docker-compose.yaml" ]; then
             echo "错误：未找到 docker-compose.yaml 文件，请确保 Drosera-Network 仓库包含该文件"
             exit 1
         fi
         if [ "$CPU_CORES" != "0" ]; then
-            # 检查是否已有 cpus 配置，动态添加或修改
-            if grep -A 10 "drosera-node:" docker-compose.yaml | grep -q "cpus:"; then
-                sed -i "/drosera-node:/,/^[^ ]/ s/cpus: .*/cpus: $CPU_CORES/" docker-compose.yaml
+            # 计算 cpuset 值（例如输入 4 -> cpuset: "1-4"）
+            CPUSET="1-$CPU_CORES"
+            # 检查是否已有 cpuset 配置，动态添加或修改
+            if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
+                sed -i "/drosera:/,/^[^ ]/ s/cpuset: .*/cpuset: \"$CPUSET\"/" docker-compose.yaml
             else
-                # 在 drosera-node 服务下添加 cpus 配置（缩进 4 空格）
-                sed -i "/drosera-node:/a\    cpus: $CPU_CORES" docker-compose.yaml
+                # 在 drosera 服务下添加 cpuset 配置（缩进 2 空格）
+                sed -i "/drosera:/a\  cpuset: \"$CPUSET\"" docker-compose.yaml
             fi
-            echo "已设置 drosera-node 的 CPU 限制为 $CPU_CORES 核心"
+            echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
-            # 如果输入 0，移除 cpus 配置（若存在）
-            if grep -A 10 "drosera-node:" docker-compose.yaml | grep -q "cpus:"; then
-                sed -i "/drosera-node:/,/^[^ ]/ {/^    cpus: .*/d}" docker-compose.yaml
-                echo "已移除 drosera-node 的 CPU 限制"
+            # 如果输入 0，移除 cpuset 配置（若存在）
+            if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
+                sed -i "/drosera:/,/^[^ ]/ {/^  cpuset: .*/d}" docker-compose.yaml
+                echo "已移除 drosera 服务的 CPU 核心绑定"
             else
-                echo "未设置 CPU 核心数限制，将使用默认配置"
+                echo "未设置 CPU 核心绑定，将使用默认配置"
             fi
         fi
 
