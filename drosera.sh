@@ -12,36 +12,39 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# 设置非交互模式
+export DEBIAN_FRONTEND=noninteractive
+
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
     # 更新系统包并安装依赖
     echo "正在更新系统包并安装依赖..."
-    apt-get update && apt-get upgrade -y || { echo "系统包更新失败"; exit 1; }
-    apt-get install -y curl ufw iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip || { echo "依赖安装失败"; exit 1; }
+    apt-get update && apt-get upgrade -y -o Dpkg::Options::="--force-confold" || { echo "系统包更新失败"; exit 1; }
+    apt-get install -y curl ufw iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip -o Dpkg::Options::="--force-confold" || { echo "依赖安装失败"; exit 1; }
     echo "依赖安装完成"
 
     # 检查并安装 jq
     if ! command -v jq &> /dev/null; then
         echo "jq 未安装，正在安装..."
-        apt-get install -y jq || { echo "jq 安装失败"; exit 1; }
+        apt-get install -y jq -o Dpkg::Options::="--force-confold" || { echo "jq 安装失败"; exit 1; }
         echo "jq 安装完成"
     else
         echo "jq 已安装，检查更新..."
-        apt-get install -y jq
+        apt-get install -y jq -o Dpkg::Options::="--force-confold"
     fi
 
     # 检查并安装 Docker
     if ! command -v docker &> /dev/null; then
         echo "Docker 未安装，正在安装..."
-        apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+        apt-get install -y apt-transport-https ca-certificates curl software-properties-common -o Dpkg::Options::="--force-confold"
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
         add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
         apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io || { echo "Docker 安装失败"; exit 1; }
+        apt-get install -y docker-ce docker-ce-cli containerd.io -o Dpkg::Options::="--force-confold" || { echo "Docker 安装失败"; exit 1; }
         echo "Docker 安装完成"
     else
         echo "Docker 已安装，检查更新..."
-        apt-get install -y docker-ce docker-ce-cli containerd.io
+        apt-get install -y docker-ce docker-ce-cli containerd.io -o Dpkg::Options::="--force-confold"
     fi
 
     # 启动并启用 Docker 服务
@@ -67,7 +70,7 @@ function install_drosera_node() {
     # 安装 Bun
     echo "正在安装 Bun..."
     if ! command -v unzip &> /dev/null; then
-        apt-get install -y unzip || { echo "unzip 安装失败"; exit 1; }
+        apt-get install -y unzip -o Dpkg::Options::="--force-confold" || { echo "unzip 安装失败"; exit 1; }
         echo "unzip 安装完成"
     fi
     curl -fsSL https://bun.sh/install | bash || { echo "Bun 安装失败"; exit 1; }
@@ -146,18 +149,21 @@ function install_drosera_node() {
 
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
-    echo "请输入 EVM 钱包私钥："
-    read -s DROSERA_PRIVATE_KEY
-    if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-        echo "错误：未提供私钥，drosera apply 将跳过"
-    else
-        echo "正在执行第一次 drosera apply..."
-        DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
-        echo "第一次 drosera apply 完成"
-    fi
+    while true; do
+        echo "请输入 EVM 钱包私钥："
+        read -s DROSERA_PRIVATE_KEY
+        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
+            echo "错误：私钥不能为空，请重新输入"
+        else
+            break
+        fi
+    done
+    echo "正在执行第一次 drosera apply..."
+    DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" echo "ofc" | drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
+    echo "第一次 drosera apply 完成"
 
     # 询问用户是否继续进行下一步
-    echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、防火墙配置、检查并停止 drosera 服务、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
+    echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
     read -r CONTINUE
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
         echo "正在执行 drosera dryrun..."
@@ -166,12 +172,15 @@ function install_drosera_node() {
         echo "drosera dryrun 完成"
 
         # 提示用户输入 EVM 钱包地址并修改 drosera.toml
-        echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
-        read WALLET_ADDRESS
-        if [ -z "$WALLET_ADDRESS" ]; then
-            echo "错误：未提供钱包地址"
-            exit 1
-        fi
+        while true; do
+            echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
+            read -r WALLET_ADDRESS
+            if [ -z "$WALLET_ADDRESS" ]; then
+                echo "错误：钱包地址不能为空，请重新输入"
+            else
+                break
+            fi
+        done
 
         # 修改 drosera.toml
         DROsera_TOML="/root/my-drosera-trap/drosera.toml"
@@ -194,24 +203,20 @@ function install_drosera_node() {
         fi
 
         # 执行第二次 drosera apply
-        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-            echo "错误：未提供私钥，第二次 drosera apply 将跳过"
-        else
-            echo "正在执行第二次 drosera apply..."
-            cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-            MAX_RETRIES=3
-            RETRY_COUNT=0
-            until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" drosera apply; do
-                RETRY_COUNT=$((RETRY_COUNT + 1))
-                if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-                    echo "第二次 drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key drosera apply' 或检查冷却期。"
-                    exit 1
-                fi
-                echo "第二次 drosera apply 失败，可能由于冷却期未结束。等待 300 秒后重试（第 $RETRY_COUNT 次）..."
-                sleep 300
-            done
-            echo "第二次 drosera apply 完成"
-        fi
+        echo "正在执行第二次 drosera apply..."
+        cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" echo "ofc" | drosera apply; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+                echo "第二次 drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key echo \"ofc\" | drosera apply' 或检查冷却期。"
+                exit 1
+            fi
+            echo "第二次 drosera apply 失败，可能由于冷却期未结束。等待 300 秒后重试（第 $RETRY_COUNT 次）..."
+            sleep 300
+        done
+        echo "第二次 drosera apply 完成"
 
         # 安装 Drosera Operator
         echo "切换到主目录并安装 Drosera Operator..."
@@ -237,13 +242,9 @@ function install_drosera_node() {
         echo "Drosera Operator Docker 镜像拉取完成"
 
         # 运行 Drosera Operator 注册
-        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-            echo "错误：未提供私钥，drosera-operator register 将跳过"
-        else
-            echo "正在运行 Drosera Operator 注册..."
-            drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key "$DROSERA_PRIVATE_KEY" || { echo "Drosera Operator 注册失败"; exit 1; }
-            echo "Drosera Operator 注册完成"
-        fi
+        echo "正在运行 Drosera Operator 注册..."
+        drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key "$DROSERA_PRIVATE_KEY" || { echo "Drosera Operator 注册失败"; exit 1; }
+        echo "Drosera Operator 注册完成"
 
         # 检查并停止 drosera 服务
         echo "正在检查 drosera 服务状态..."
@@ -266,20 +267,19 @@ function install_drosera_node() {
         echo "检测到机器有 $AVAILABLE_CORES 个 CPU 核心"
 
         # 输入 CPU 核心数
-        echo "请输入要使用的 CPU 核心数（例如 4 表示使用核心 1-4，$AVAILABLE_CORES 表示核心 1-$AVAILABLE_CORES，输入 0 表示不限制）："
-        read CPU_CORES
-
-        # 验证输入
-        if [[ ! "$CPU_CORES" =~ ^[0-9]+$ ]]; then
-            echo "错误：请输入一个正整数或 0（0 表示不限制）"
-            exit 1
-        elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -gt "$AVAILABLE_CORES" ]; then
-            echo "错误：输入的核心数 ($CPU_CORES) 超过系统可用核心数 ($AVAILABLE_CORES)"
-            exit 1
-        elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -lt 1 ]; then
-            echo "错误：核心数必须为正整数或 0"
-            exit 1
-        fi
+        while true; do
+            echo "请输入要使用的 CPU 核心数（例如 4 表示使用核心 1-4，$AVAILABLE_CORES 表示核心 1-$AVAILABLE_CORES，输入 0 表示不限制）："
+            read -r CPU_CORES
+            if [[ ! "$CPU_CORES" =~ ^[0-9]+$ ]]; then
+                echo "错误：请输入一个正整数或 0（0 表示不限制）"
+            elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -gt "$AVAILABLE_CORES" ]; then
+                echo "错误：输入的核心数 ($CPU_CORES) 超过系统可用核心数 ($AVAILABLE_CORES)"
+            elif [ "$CPU_CORES" != "0" ] && [ "$CPU_CORES" -lt 1 ]; then
+                echo "错误：核心数必须为正整数或 0"
+            else
+                break
+            fi
+        done
 
         # 切换到 Drosera-Network 目录并复制 .env 文件
         echo "切换到 Drosera-Network 目录并复制 .env 文件..."
@@ -298,12 +298,12 @@ function install_drosera_node() {
         echo "已更新 .env 的 VPS_IP 为 $SERVER_IP"
 
         # 写入 ETH_PRIVATE_KEY 到 .env
-        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
-            echo "错误：未提供私钥，ETH_PRIVATE_KEY 配置将跳过"
-        else
-            sed -i "s/ETH_PRIVATE_KEY=.*/ETH_PRIVATE_KEY=$DROSERA_PRIVATE_KEY/" .env
-            echo "已更新 .env 的 ETH_PRIVATE_KEY"
-        fi
+        sed -i "s/ETH_PRIVATE_KEY=.*/ETH_PRIVATE_KEY=$DROSERA_PRIVATE_KEY/" .env
+        echo "已更新 .env 的 ETH_PRIVATE_KEY"
+
+        # 设置 .env 文件权限
+        chmod 600 .env
+        echo "已设置 .env 文件权限为 600"
 
         # 修改 docker-compose.yaml 以动态设置 CPU 核心绑定
         echo "正在配置 docker-compose.yaml 以绑定 CPU 核心..."
@@ -325,7 +325,7 @@ function install_drosera_node() {
                 sed -i "/drosera:/,/^[^ ]/ s/cpuset: .*/cpuset: \"$CPUSET\"/" docker-compose.yaml
             else
                 # 在 drosera 服务下添加 cpuset 配置（确保缩进为 2 空格）
-                awk '/drosera:/ {print; print "  cpuset: \""'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml
+                awk '/drosera:/ {print; print "  cpuset: \""'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml || { echo "awk 处理 docker-compose.yaml 失败"; exit 1; }
             fi
             echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
@@ -334,9 +334,20 @@ function install_drosera_node() {
                 sed -i "/drosera:/,/^[^ ]/ {/^  cpuset: .*/d}" docker-compose.yaml
                 echo "已移除 drosera 服务的 CPU 核心绑定"
             else
-                echo "未设置 CPU 核心绑定，将使用 h默认配置"
+                echo "未设置 CPU 核心绑定，将使用默认配置"
             fi
         fi
+
+        # 移除 docker-compose.yaml 中的 version 属性（如果存在）
+        if grep -q "^version:" docker-compose.yaml; then
+            sed -i "/^version:/d" docker-compose.yaml
+            echo "已移除 docker-compose.yaml 中的过时 version 属性"
+        fi
+
+        # 修改 docker-compose.yaml 使用 .env 中的 ETH_PRIVATE_KEY
+        echo "正在配置 docker-compose.yaml 以使用 .env 中的 ETH_PRIVATE_KEY..."
+        sed -i '/drosera:/,/^[^ ]/ s/--eth-private-key .*/--eth-private-key ${ETH_PRIVATE_KEY}/' docker-compose.yaml
+        echo "已更新 docker-compose.yaml 以引用 .env 中的 ETH_PRIVATE_KEY"
 
         # 验证 docker-compose.yaml 的语法
         echo "正在验证 docker-compose.yaml 的语法..."
@@ -353,11 +364,17 @@ function install_drosera_node() {
         # 启动 Docker Compose 服务
         echo "正在启动 Docker Compose 服务..."
         if command -v docker-compose &> /dev/null; then
-            echo "使用手动 docker-compose 启动服务..."
+            echo "使用 docker-compose 启动服务..."
             docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            echo "正在收集 Docker Compose 日志..."
+            docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
         elif docker compose version &> /dev/null; then
             echo "使用 docker compose 启动服务..."
             docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            echo "正在收集 Docker Compose 日志..."
+            docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
         else
             echo "错误：未找到 docker-compose 或 docker compose 命令"
             exit 1
@@ -380,8 +397,13 @@ function install_drosera_node() {
 
 # 命令2：查看日志
 function view_logs() {
-    echo "正在查看 drosera-node 日志..."
-    docker logs -f drosera-node
+    echo "正在检查 drosera-node 容器..."
+    if docker ps -a --format '{{.Names}}' | grep -q "^drosera-node$"; then
+        echo "正在查看 drosera-node 日志..."
+        docker logs -f drosera-node
+    else
+        echo "错误：drosera-node 容器不存在，请先运行安装流程"
+    fi
     echo "日志查看结束，按任意键返回主菜单..."
     read -r
 }
@@ -390,16 +412,26 @@ function view_logs() {
 function restart_operators() {
     echo "正在重启 Operators..."
     cd ~/Drosera-Network || { echo "切换到 Drosera-Network 目录失败"; exit 1; }
+    if [ ! -f "docker-compose.yaml" ]; then
+        echo "错误：未找到 docker-compose.yaml 文件，请确保 Drosera-Network 目录正确"
+        exit 1
+    fi
     if command -v docker-compose &> /dev/null; then
         echo "使用 docker-compose 停止服务..."
         docker-compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
         echo "使用 docker-compose 启动服务..."
         docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        echo "正在收集 Docker Compose 日志..."
+        docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
     elif docker compose version &> /dev/null; then
         echo "使用 docker compose 停止服务..."
         docker compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
         echo "使用 docker compose 启动服务..."
         docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        echo "正在收集 Docker Compose 日志..."
+        docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
     else
         echo "错误：未找到 docker-compose 或 docker compose 命令"
         exit 1
@@ -413,16 +445,17 @@ function restart_operators() {
 function main_menu() {
     while true; do
         clear
+        echo "================================================================"
         echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie，免费开源，请勿相信收费"
         echo "如有问题，可联系推特，仅此只有一个号"
         echo "================================================================"
-        echo "退出脚本，请按键盘 ctrl + C 退出即可"
+        echo "退出脚本，请按键盘 Ctrl + C"
         echo "请选择要执行的操作:"
         echo "1. 安装 Drosera 节点"
-        echo "2. 查看日志"
+        echo "2. 查看 drosera-node 日志"
         echo "3. 重启 Operators"
         echo -n "请输入选项 (1-3): "
-        read choice
+        read -r choice
         case $choice in
             1) install_drosera_node ;;
             2) view_logs ;;
