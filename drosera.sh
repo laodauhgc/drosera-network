@@ -443,6 +443,31 @@ function restart_operators() {
 
 # 命令4：升级到1.17并修改drosera_rpc
 function upgrade_to_1_17() {
+    # 安装 Drosera
+    echo "正在安装 Drosera..."
+    curl -L https://app.drosera.io/install | bash || { echo "Drosera 安装失败"; exit 1; }
+    source /root/.bashrc
+    export PATH=$PATH:/root/.drosera/bin
+    echo 'export PATH=$PATH:/root/.drosera/bin' >> /root/.bashrc
+    if command -v droseraup &> /dev/null; then
+        droseraup || { echo "droseraup 执行失败"; exit 1; }
+        echo "Drosera 安装完成"
+    else
+        echo "droseraup 命令未找到，Drosera 安装失败"
+        exit 1
+    fi
+
+    # 检查 Drosera 二进制文件并验证版本
+    DROsera_BIN="/root/.drosera/bin/drosera"
+    if [ -f "$DROsera_BIN" ]; then
+        echo "找到 Drosera，正在验证版本..."
+        $DROsera_BIN --version || { echo "Drosera 版本检查失败"; exit 1; }
+        echo "Drosera 版本检查成功"
+    else
+        echo "Drosera 未找到（$DROsera_BIN 不存在）"
+        exit 1
+    fi
+
     # 切换到 my-drosera-trap 目录
     echo "切换到 /root/my-drosera-trap 目录..."
     cd /root/my-drosera-trap || { echo "错误：无法切换到 /root/my-drosera-trap 目录，请确保目录存在"; exit 1; }
@@ -450,7 +475,7 @@ function upgrade_to_1_17() {
     # 检查 drosera.toml 文件
     DROsera_TOML="/root/my-drosera-trap/drosera.toml"
     if [ ! -f "$DROsera_TOML" ]; then
-        echo "错误：未找到 drosera.toml 文件 ($DROsera_TOML)。请先运行 '安装 Drosera 节点'（选项 1）以生成配置文件。"
+        echo "错误：未找到 drosera.toml 文件 ($DROsera_TOML)。请确保 Drosera 安装正确并生成了配置文件。"
         exit 1
     fi
 
@@ -487,7 +512,7 @@ function upgrade_to_1_17() {
         fi
     done
     
-    # 执行drosera apply
+    # 执行 drosera apply
     echo "正在执行 drosera apply..."
     echo "等待 20 秒以确保准备就绪..."
     sleep 20
