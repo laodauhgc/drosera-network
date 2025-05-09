@@ -441,6 +441,55 @@ function restart_operators() {
     read -r
 }
 
+# 命令4：升级到1.17并修改drosera.toml
+function upgrade_to_1_17() {
+    echo "正在升级到1.17并修改drosera.toml..."
+    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
+    
+    # 检查drosera.toml文件是否存在
+    if [ -f "$DROsera_TOML" ]; then
+        echo "找到drosera.toml，正在修改drosera_rpc..."
+        # 替换drosera_rpc地址
+        sed -i 's|drosera_rpc = "https://seed-node.testnet.drosera.io"|drosera_rpc = "https://relay.testnet.drosera.io"|' "$DROsera_TOML" || { echo "修改drosera_rpc失败"; exit 1; }
+        echo "drosera_rpc已更新为 https://relay.testnet.drosera.io"
+        
+        # 验证修改是否成功
+        if grep -q 'drosera_rpc = "https://relay.testnet.drosera.io"' "$DROsera_TOML"; then
+            echo "drosera.toml修改验证成功"
+        else
+            echo "错误：drosera.toml修改未生效，请检查文件内容"
+            exit 1
+        fi
+    else
+        echo "错误：未找到drosera.toml（$DROsera_TOML）"
+        exit 1
+    fi
+
+    # 切换到my-drosera-trap目录
+    echo "切换到 /root/my-drosera-trap 目录..."
+    cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
+
+    # 执行drosera apply
+    echo "正在执行 drosera apply..."
+    MAX_RETRIES=3
+    RETRY_COUNT=0
+    until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" echo "ofc" | drosera apply; do
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+            echo "drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key echo \"ofc\" | drosera apply' 或检查冷却期。"
+            unset DROSERA_PRIVATE_KEY
+            exit 1
+        fi
+        echo "drosera apply 失败，可能由于冷却期未结束。等待 300 秒后重试（第 $RETRY_COUNT 次）..."
+        sleep 300
+    done
+    echo "drosera apply 完成"
+    
+    echo "升级到1.17完成"
+    echo "按任意键返回主菜单..."
+    read -r
+}
+
 # 主菜单函数
 function main_menu() {
     while true; do
@@ -454,13 +503,15 @@ function main_menu() {
         echo "1. 安装 Drosera 节点"
         echo "2. 查看 drosera-node 日志"
         echo "3. 重启 Operators"
-        echo -n "请输入选项 (1-3): "
+        echo "4. 升级到1.17并修改drosera_rpc"
+        echo -n "请输入选项 (1-4): "
         read -r choice
         case $choice in
             1) install_drosera_node ;;
             2) view_logs ;;
             3) restart_operators ;;
-            *) echo "无效选项，请输入 1、2 或 3" ; sleep 2 ;;
+            4) upgrade_to_1_17 ;;
+            *) echo "无效选项，请输入 1、2、3 或 4" ; sleep 2 ;;
         esac
     done
 }
