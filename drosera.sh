@@ -455,19 +455,20 @@ function upgrade_to_1_17() {
     fi
 
     # 修改 drosera.toml 中的 drosera_rpc
+    DROsera_RPC="https://relay.testnet.drosera.io"  # 使用指定的 RPC 端点
     echo "正在更新 drosera.toml 中的 drosera_rpc 配置..."
     if grep -q "^drosera_rpc = " "$DROsera_TOML"; then
         # 如果 drosera_rpc 存在，替换其值
-        sed -i "s|^drosera_rpc = .*|drosera_rpc = \"https://relay.testnet.drosera.io\"|" "$DROsera_TOML"
-        echo "已更新 drosera_rpc 为 https://relay.testnet.drosera.io"
+        sed -i "s|^drosera_rpc = .*|drosera_rpc = \"$DROsera_RPC\"|" "$DROsera_TOML"
+        echo "已更新 drosera_rpc 为 $DROsera_RPC"
     else
         # 如果 drosera_rpc 不存在，追加到文件末尾
-        echo "drosera_rpc = \"https://relay.testnet.drosera.io\"" >> "$DROsera_TOML"
-        echo "已添加 drosera_rpc = https://relay.testnet.drosera.io 到 drosera.toml"
+        echo "drosera_rpc = \"$DROsera_RPC\"" >> "$DROsera_TOML"
+        echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
     fi
 
     # 验证 drosera.toml 是否正确更新
-    if grep -q "drosera_rpc = \"https://relay.testnet.drosera.io\"" "$DROsera_TOML"; then
+    if grep -q "drosera_rpc = \"$DROsera_RPC\"" "$DROsera_TOML"; then
         echo "drosera.toml 配置验证通过"
     else
         echo "错误：drosera.toml 中的 drosera_rpc 配置更新失败"
@@ -477,7 +478,7 @@ function upgrade_to_1_17() {
     # 提示用户输入EVM钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
-        echo "请输入 EVM 钱包私钥（盲文）："
+        echo "请输入 EVM 钱包私钥："
         read -s DROSERA_PRIVATE_KEY
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：私钥不能为空，请重新输入"
@@ -488,21 +489,13 @@ function upgrade_to_1_17() {
     
     # 执行drosera apply
     echo "正在执行 drosera apply..."
-    MAX_RETRIES=3
-    RETRY_COUNT=0
-    # 使用 export 设置环境变量，并在命令中直接传递私钥参数以确保兼容性
-    export DROSERA_PRIVATE_KEY
-    until echo "ofc" | drosera apply --private-key "$DROSERA_PRIVATE_KEY"; do
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-            echo "drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'cd /root/my-drosera-trap && echo \"ofc\" | drosera apply --private-key your_private_key' 或检查错误日志。"
-            unset DROSERA_PRIVATE_KEY
-            exit 1
-        fi
-        echo "drosera apply 失败，等待 300 秒后重试（第 $RETRY_COUNT 次）..."
-        sleep 300
-    done
-    echo "drosera apply 完成"
+    if echo "ofc" | drosera apply --private-key "$DROSERA_PRIVATE_KEY"; then
+        echo "drosera apply 完成"
+    else
+        echo "drosera apply 失败，请手动运行 'cd /root/my-drosera-trap && echo \"ofc\" | drosera apply --private-key your_private_key' 并检查错误日志。"
+        unset DROSERA_PRIVATE_KEY
+        exit 1
+    fi
     
     # 清理私钥变量
     unset DROSERA_PRIVATE_KEY
