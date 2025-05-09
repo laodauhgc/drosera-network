@@ -489,6 +489,8 @@ function upgrade_to_1_17() {
     
     # 执行drosera apply
     echo "正在执行 drosera apply..."
+    echo "等待 20 秒以确保准备就绪..."
+    sleep 20
     if echo "ofc" | drosera apply --private-key "$DROSERA_PRIVATE_KEY"; then
         echo "drosera apply 完成"
     else
