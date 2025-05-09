@@ -441,34 +441,18 @@ function restart_operators() {
     read -r
 }
 
-# 命令4：升级到1.17并修改drosera.toml
-function upgrade_to_1_17() {
-    echo "正在升级到1.17并修改drosera.toml..."
-    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
-    
-    # 检查drosera.toml文件是否存在
-    if [ -f "$DROsera_TOML" ]; then
-        echo "找到drosera.toml，正在修改drosera_rpc..."
-        # 替换drosera_rpc地址
-        sed -i 's|drosera_rpc = "https://seed-node.testnet.drosera.io"|drosera_rpc = "https://relay.testnet.drosera.io"|' "$DROsera_TOML" || { echo "修改drosera_rpc失败"; exit 1; }
-        echo "drosera_rpc已更新为 https://relay.testnet.drosera.io"
-        
-        # 验证修改是否成功
-        if grep -q 'drosera_rpc = "https://relay.testnet.drosera.io"' "$DROsera_TOML"; then
-            echo "drosera.toml修改验证成功"
+# 提示用户输入EVM钱包私钥
+    echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
+    while true; do
+        echo "请输入 EVM 钱包私钥："
+        read -s DROSERA_PRIVATE_KEY
+        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
+            echo "错误：私钥不能为空，请重新输入"
         else
-            echo "错误：drosera.toml修改未生效，请检查文件内容"
-            exit 1
+            break
         fi
-    else
-        echo "错误：未找到drosera.toml（$DROsera_TOML）"
-        exit 1
-    fi
-
-    # 切换到my-drosera-trap目录
-    echo "切换到 /root/my-drosera-trap 目录..."
-    cd /root/my-drosera-trap || { echo "切换到 my-drosera-trap 失败"; exit 1; }
-
+    done
+    
     # 执行drosera apply
     echo "正在执行 drosera apply..."
     MAX_RETRIES=3
@@ -485,7 +469,11 @@ function upgrade_to_1_17() {
     done
     echo "drosera apply 完成"
     
-    echo "升级到1.17完成"
+    # 清理私钥变量
+    unset DROSERA_PRIVATE_KEY
+    echo "私钥变量已清理"
+
+    echo "升级到1.17及drosera apply执行完成"
     echo "按任意键返回主菜单..."
     read -r
 }
