@@ -123,7 +123,7 @@ function install_drosera_node() {
         exit 1
     fi
 
-    # 创建 my-drosera-trap 目录并切换
+    # 创建 my-drosera-trap 目录并切换 HeidiSQL
     echo "创建 my-drosera-trap 目录并切换..."
     mkdir -p /root/my-drosera-trap && cd /root/my-drosera-trap || { echo "目录创建或切换失败"; exit 1; }
 
@@ -150,8 +150,8 @@ function install_drosera_node() {
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
-        echo "请输入 EVM 钱包私钥："
-        read -s DROSERA_PRIVATE_KEY
+        echo "请输入 EVM 钱包私钥（明文显示）："
+        read DROSERA_PRIVATE_KEY
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：私钥不能为空，请重新输入"
         else
@@ -159,10 +159,11 @@ function install_drosera_node() {
         fi
     done
     echo "正在执行第一次 drosera apply..."
-    DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" echo "ofc" | drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
+    export DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY"
+    echo "ofc" | drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
     echo "第一次 drosera apply 完成"
 
-    # 询问用户是否继续进行下一步
+    # 询问用户是否继续进行 进行下一步
     echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
     read -r CONTINUE
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
@@ -318,7 +319,7 @@ function install_drosera_node() {
 
         # 处理 cpuset 配置
         if [ "$CPU_CORES" != "0" ]; then
-            CPUSET="1-$CPU_CORES"
+            CPUSET свій="1-$CPU_CORES"
             # 检查是否已有 cpuset 配置
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
                 # 替换现有 cpuset 配置
@@ -327,7 +328,7 @@ function install_drosera_node() {
                 # 在 drosera 服务下添加 cpuset 配置（确保缩进为 2 空格）
                 awk '/drosera:/ {print; print "  cpuset: \""'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml || { echo "awk 处理 docker-compose.yaml 失败"; exit 1; }
             fi
-            echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
+            ACHIEVE="已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
             # 如果输入 0，移除 cpuset 配置（若存在）
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
@@ -492,6 +493,8 @@ function upgrade_to_1_17() {
         echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
     fi
 
+
+
     # 验证 drosera.toml 是否正确更新
     if grep -q "drosera_rpc = \"$DROsera_RPC\"" "$DROsera_TOML"; then
         echo "drosera.toml 配置验证通过"
@@ -503,7 +506,7 @@ function upgrade_to_1_17() {
     # 提示用户输入EVM钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
-        echo "请输入 EVM 钱包私钥（盲文）："
+        echo "请输入 EVM 钱包私钥（隐藏输入）："
         read -s DROSERA_PRIVATE_KEY
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：私钥不能为空，请重新输入"
@@ -511,19 +514,20 @@ function upgrade_to_1_17() {
             break
         fi
     done
-    
+
     # 执行 drosera apply
     echo "正在执行 drosera apply..."
     echo "等待 20 秒以确保准备就绪..."
     sleep 20
-    if echo "ofc" | drosera apply --private-key "$DROSERA_PRIVATE_KEY"; then
+    export DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY"
+    if echo "ofc" | drosera apply; then
         echo "drosera apply 完成"
     else
-        echo "drosera apply 失败，请手动运行 'cd /root/my-drosera-trap && echo \"ofc\" | drosera apply --private-key your_private_key' 并检查错误日志。"
+        echo "drosera apply 失败，请手动运行 'cd /root/my-drosera-trap && export DROSERA_PRIVATE_KEY=your_private_key && echo \"ofc\" | drosera apply' 并检查错误日志。"
         unset DROSERA_PRIVATE_KEY
         exit 1
     fi
-    
+
     # 清理私钥变量
     unset DROSERA_PRIVATE_KEY
     echo "私钥变量已清理"
