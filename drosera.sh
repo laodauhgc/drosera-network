@@ -441,7 +441,20 @@ function restart_operators() {
     read -r
 }
 
-# 提示用户输入EVM钱包私钥
+# 命令4：升级到1.17并修改drosera_rpc
+function upgrade_to_1_17() {
+    # 切换到 my-drosera-trap 目录
+    echo "切换到 /root/my-drosera-trap 目录..."
+    cd /root/my-drosera-trap || { echo "错误：无法切换到 /root/my-drosera-trap 目录，请确保目录存在"; exit 1; }
+
+    # 检查 drosera.toml 文件
+    DROsera_TOML="/root/my-drosera-trap/drosera.toml"
+    if [ ! -f "$DROsera_TOML" ]; then
+        echo "错误：未找到 drosera.toml 文件 ($DROsera_TOML)。请先运行 '安装 Drosera 节点'（选项 1）以生成配置文件。"
+        exit 1
+    fi
+
+    # 提示用户输入EVM钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
         echo "请输入 EVM 钱包私钥："
@@ -460,7 +473,7 @@ function restart_operators() {
     until DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY" echo "ofc" | drosera apply; do
         RETRY_COUNT=$((RETRY_COUNT + 1))
         if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-            echo "drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'DROSERA_PRIVATE_KEY=your_private_key echo \"ofc\" | drosera apply' 或检查冷却期。"
+            echo "drosera apply 失败，已达到最大重试次数 ($MAX_RETRIES)。请稍后手动运行 'cd /root/my-drosera-trap && DROSERA_PRIVATE_KEY=your_private_key echo \"ofc\" | drosera apply' 或检查冷却期。"
             unset DROSERA_PRIVATE_KEY
             exit 1
         fi
