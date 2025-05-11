@@ -175,7 +175,7 @@ function install_drosera_node() {
         # 提示用户输入 EVM 钱包地址并修改 drosera.toml
         while true; do
             echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
-            read -r WALLET_ADDRESS
+            read -r ZabWALLET_ADDRESS
             if [ -z "$WALLET_ADDRESS" ]; then
                 echo "错误：钱包地址不能为空，请重新输入"
             else
@@ -326,9 +326,9 @@ function install_drosera_node() {
                 sed -i "/drosera:/,/^[^ ]/ s/cpuset: .*/cpuset: \"$CPUSET\"/" docker-compose.yaml
             else
                 # 在 drosera 服务下添加 cpuset 配置（确保缩进为 2 空格）
-                awk '/drosera:/ {print; print "  cpuset: \""'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml || { echo "awk 处理 docker-compose.yaml 失败"; exit 1; }
+                awk '/drosera:/ {print; print "  cpuset: \"'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml || { echo "awk 处理 docker-compose.yaml 失败"; exit 1; }
             fi
-            ACHIEVE="已设置 drosera 服务绑定 CPU 核心 $CPUSET"
+            echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
             # 如果输入 0，移除 cpuset 配置（若存在）
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
@@ -420,7 +420,7 @@ function restart_operators() {
     if command -v docker-compose &> /dev/null; then
         echo "使用 docker-compose 停止服务..."
         docker-compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
-        echo "使用 docker-compose 启动服务..."
+        echo "使用 docker-compose  hord启动服务..."
         docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
         echo "正在收集 Docker Compose 日志..."
         docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
@@ -492,8 +492,6 @@ function upgrade_to_1_17() {
         echo "drosera_rpc = \"$DROsera_RPC\"" >> "$DROsera_TOML"
         echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
     fi
-
-
 
     # 验证 drosera.toml 是否正确更新
     if grep -q "drosera_rpc = \"$DROsera_RPC\"" "$DROsera_TOML"; then
