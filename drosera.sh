@@ -319,7 +319,7 @@ function install_drosera_node() {
 
         # 处理 cpuset 配置
         if [ "$CPU_CORES" != "0" ]; then
-            CPUSET свій="1-$CPU_CORES"
+            CPUSET="1-$CPU_CORES"
             # 检查是否已有 cpuset 配置
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
                 # 替换现有 cpuset 配置
