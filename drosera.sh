@@ -15,6 +15,20 @@ fi
 # 设置非交互模式
 export DEBIAN_FRONTEND=noninteractive
 
+# 函数：验证 YAML 语法
+validate_yaml() {
+    local file=$1
+    if command -v docker-compose &> /dev/null; then
+        docker-compose -f "$file" config > /dev/null 2>&1 || { echo "文件 $file 的 YAML 语法错误"; return 1; }
+    elif docker compose version &> /dev/null; then
+        docker compose -f "$file" config > /dev/null 2>&1 || { echo "文件 $file 的 YAML 语法错误"; return 1; }
+    else
+        echo "错误：未找到 docker-compose 或 docker compose 命令"
+        exit 1
+    fi
+    echo "文件 $file 的 YAML 语法验证通过"
+}
+
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
     # 更新系统包并安装依赖
@@ -56,10 +70,7 @@ function install_drosera_node() {
         echo "Docker Compose 未安装，正在安装最新版本..."
         curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
-        if ! docker-compose --version &> /dev/null; then
-            echo "Docker Compose 安装失败"
-            exit 1
-        fi
+        docker-compose --version &> /dev/null || { echo "Docker Compose 安装失败"; exit 1; }
         echo "Docker Compose 安装完成"
     else
         echo "Docker Compose 已安装，检查更新..."
@@ -74,8 +85,7 @@ function install_drosera_node() {
         echo "unzip 安装完成"
     fi
     curl -fsSL https://bun.sh/install | bash || { echo "Bun 安装失败"; exit 1; }
-    BUN_BIN="/root/.bun/bin/bun"
-    if [ -f "$BUN_BIN" ]; then
+    if [ -f "/root/.bun/bin/bun" ]; then
         echo "Bun 安装完成"
         export PATH=$PATH:/root/.bun/bin
         echo 'export PATH=$PATH:/root/.bun/bin' >> /root/.bashrc
@@ -123,7 +133,7 @@ function install_drosera_node() {
         exit 1
     fi
 
-    # 创建 my-drosera-trap 目录并切换 HeidiSQL
+    # 创建 my-drosera-trap 目录并切换
     echo "创建 my-drosera-trap 目录并切换..."
     mkdir -p /root/my-drosera-trap && cd /root/my-drosera-trap || { echo "目录创建或切换失败"; exit 1; }
 
@@ -150,8 +160,8 @@ function install_drosera_node() {
     # 提示用户确保 Holesky ETH 资金并输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
-        echo "请输入 EVM 钱包私钥（明文显示）："
-        read DROSERA_PRIVATE_KEY
+        echo "请输入 EVM 钱包私钥（隐藏输入）："
+        read -s DROSERA_PRIVATE_KEY
         if [ -z "$DROSERA_PRIVATE_KEY" ]; then
             echo "错误：私钥不能为空，请重新输入"
         else
@@ -163,7 +173,7 @@ function install_drosera_node() {
     echo "ofc" | drosera apply || { echo "第一次 drosera apply 失败"; exit 1; }
     echo "第一次 drosera apply 完成"
 
-    # 询问用户是否继续进行 进行下一步
+    # 询问用户是否继续进行下一步
     echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
     read -r CONTINUE
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
@@ -290,11 +300,17 @@ function install_drosera_node() {
 
         # 自动获取服务器公网 IP 并写入 .env
         echo "正在自动获取服务器公网 IP 地址..."
-        SERVER_IP=$(curl -s https://api.ipify.org)
-        if [ -z "$SERVER_IP" ]; then
-            echo "错误：无法获取服务器公网 IP，请检查网络连接"
-            exit 1
-        fi
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        until SERVER_IP=$(curl -s https://api.ipify.org); do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+                echo "错误：无法获取服务器公网 IP，请检查网络连接"
+                exit 1
+            fi
+            echo "获取公网 IP 失败，等待 5 秒后重试（第 $RETRY_COUNT 次）..."
+            sleep 5
+        done
         sed -i "s/VPS_IP=.*/VPS_IP=$SERVER_IP/" .env
         echo "已更新 .env 的 VPS_IP 为 $SERVER_IP"
 
@@ -323,21 +339,24 @@ function install_drosera_node() {
             # 检查是否已有 cpuset 配置
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
                 # 替换现有 cpuset 配置
-                sed -i "/drosera:/,/^[^ ]/ s/cpuset: .*/cpuset: \"$CPUSET\"/" docker-compose.yaml
+                sed -i "/drosera:/,/^[^ ]/ s/[[:space:]]*cpuset: .*/    cpuset: \"$CPUSET\"/" docker-compose.yaml
             else
-                # 在 drosera 服务下添加 cpuset 配置（确保缩进为 2 空格）
-                awk '/drosera:/ {print; print "  cpuset: \"'"$CPUSET"'\""; next} 1' docker-compose.yaml > tmp.yaml && mv tmp.yaml docker-compose.yaml || { echo "awk 处理 docker-compose.yaml 失败"; exit 1; }
+                # 添加 cpuset 配置，确保缩进为 4 个空格
+                sed -i "/drosera:/a\    cpuset: \"$CPUSET\"" docker-compose.yaml
             fi
             echo "已设置 drosera 服务绑定 CPU 核心 $CPUSET"
         else
             # 如果输入 0，移除 cpuset 配置（若存在）
             if grep -A 10 "drosera:" docker-compose.yaml | grep -q "cpuset:"; then
-                sed -i "/drosera:/,/^[^ ]/ {/^  cpuset: .*/d}" docker-compose.yaml
+                sed -i "/drosera:/,/^[^ ]/ {/[[:space:]]*cpuset: .*/d}" docker-compose.yaml
                 echo "已移除 drosera 服务的 CPU 核心绑定"
             else
                 echo "未设置 CPU 核心绑定，将使用默认配置"
             fi
         fi
+
+        # 验证 cpuset 修改后的 docker-compose.yaml
+        validate_yaml docker-compose.yaml || { echo "cpuset 修改后 docker-compose.yaml 语法错误"; exit 1; }
 
         # 移除 docker-compose.yaml 中的 version 属性（如果存在）
         if grep -q "^version:" docker-compose.yaml; then
@@ -345,21 +364,17 @@ function install_drosera_node() {
             echo "已移除 docker-compose.yaml 中的过时 version 属性"
         fi
 
+        # 验证 version 移除后的 docker-compose.yaml
+        validate_yaml docker-compose.yaml || { echo "version 移除后 docker-compose.yaml 语法错误"; exit 1; }
+
         # 修改 docker-compose.yaml 使用 .env 中的 ETH_PRIVATE_KEY
         echo "正在配置 docker-compose.yaml 以使用 .env 中的 ETH_PRIVATE_KEY..."
         sed -i '/drosera:/,/^[^ ]/ s/--eth-private-key .*/--eth-private-key ${ETH_PRIVATE_KEY}/' docker-compose.yaml
         echo "已更新 docker-compose.yaml 以引用 .env 中的 ETH_PRIVATE_KEY"
 
-        # 验证 docker-compose.yaml 的语法
+        # 最终验证 docker-compose.yaml 的语法
         echo "正在验证 docker-compose.yaml 的语法..."
-        if command -v docker-compose &> /dev/null; then
-            docker-compose -f docker-compose.yaml config || { echo "docker-compose.yaml 语法错误，请检查文件"; exit 1; }
-        elif docker compose version &> /dev/null; then
-            docker compose -f docker-compose.yaml config || { echo "docker-compose.yaml 语法错误，请检查文件"; exit 1; }
-        else
-            echo "错误：未找到 docker-compose 或 docker compose 命令"
-            exit 1
-        fi
+        validate_yaml docker-compose.yaml || { echo "最终 docker-compose.yaml 语法错误，请检查文件"; exit 1; }
         echo "docker-compose.yaml 语法验证通过"
 
         # 启动 Docker Compose 服务
@@ -420,7 +435,7 @@ function restart_operators() {
     if command -v docker-compose &> /dev/null; then
         echo "使用 docker-compose 停止服务..."
         docker-compose -f docker-compose.yaml down || { echo "Docker Compose 服务停止失败"; exit 1; }
-        echo "使用 docker-compose  hord启动服务..."
+        echo "使用 docker-compose 启动服务..."
         docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
         echo "正在收集 Docker Compose 日志..."
         docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
@@ -442,7 +457,7 @@ function restart_operators() {
     read -r
 }
 
-# 命令4：升级到1.17并修改drosera_rpc
+# 命令4：升级到1.17并修改 drosera_rpc
 function upgrade_to_1_17() {
     # 安装 Drosera
     echo "正在安装 Drosera..."
@@ -481,14 +496,12 @@ function upgrade_to_1_17() {
     fi
 
     # 修改 drosera.toml 中的 drosera_rpc
-    DROsera_RPC="https://relay.testnet.drosera.io"  # 使用指定的 RPC 端点
+    DROsera_RPC="https://relay.testnet.drosera.io"
     echo "正在更新 drosera.toml 中的 drosera_rpc 配置..."
     if grep -q "^drosera_rpc = " "$DROsera_TOML"; then
-        # 如果 drosera_rpc 存在，替换其值
         sed -i "s|^drosera_rpc = .*|drosera_rpc = \"$DROsera_RPC\"|" "$DROsera_TOML"
         echo "已更新 drosera_rpc 为 $DROsera_RPC"
     else
-        # 如果 drosera_rpc 不存在，追加到文件末尾
         echo "drosera_rpc = \"$DROsera_RPC\"" >> "$DROsera_TOML"
         echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
     fi
@@ -501,7 +514,7 @@ function upgrade_to_1_17() {
         exit 1
     fi
 
-    # 提示用户输入EVM钱包私钥
+    # 提示用户输入 EVM 钱包私钥
     echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
     while true; do
         echo "请输入 EVM 钱包私钥（隐藏输入）："
@@ -530,7 +543,7 @@ function upgrade_to_1_17() {
     unset DROSERA_PRIVATE_KEY
     echo "私钥变量已清理"
 
-    echo "升级到1.17及drosera apply执行完成"
+    echo "升级到1.17及 drosera apply 执行完成"
     echo "按任意键返回主菜单..."
     read -r
 }
@@ -548,7 +561,7 @@ function main_menu() {
         echo "1. 安装 Drosera 节点"
         echo "2. 查看 drosera-node 日志"
         echo "3. 重启 Operators"
-        echo "4. 升级到1.17并修改drosera_rpc"
+        echo "4. 升级到1.17并修改 drosera_rpc"
         echo -n "请输入选项 (1-4): "
         read -r choice
         case $choice in
