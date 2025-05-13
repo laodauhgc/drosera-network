@@ -175,7 +175,7 @@ function install_drosera_node() {
         # 提示用户输入 EVM 钱包地址并修改 drosera.toml
         while true; do
             echo "请输入 EVM 钱包地址（用于 drosera.toml 的 whitelist）："
-            read -r ZabWALLET_ADDRESS
+            read -r WALLET_ADDRESS
             if [ -z "$WALLET_ADDRESS" ]; then
                 echo "错误：钱包地址不能为空，请重新输入"
             else
