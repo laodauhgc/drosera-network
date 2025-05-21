@@ -369,7 +369,7 @@ function install_drosera_node() {
 
         # 修改 docker-compose.yaml 使用 .env 中的 ETH_PRIVATE_KEY
         echo "正在配置 docker-compose.yaml 以使用 .env 中的 ETH_PRIVATE_KEY..."
-        sed -i '/drosera:/,/^[^ ]/ s/--eth-private-key .*/--eth-private-key ${ETH_PRIVATE_KEY}/' docker-compose.yaml
+        sed -i '/drosera:/,/^[^ ]/ s/--eth-private-key \S*/--eth-private-key ${ETH_PRIVATE_KEY}/' docker-compose.yaml
         echo "已更新 docker-compose.yaml 以引用 .env 中的 ETH_PRIVATE_KEY"
 
         # 最终验证 docker-compose.yaml 的语法
