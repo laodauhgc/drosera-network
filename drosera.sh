@@ -548,6 +548,227 @@ function upgrade_to_1_17() {
     read -r
 }
 
+# 命令5：获取Cadet角色
+function claim_cadet_role() {
+    echo "正在准备获取 Drosera Cadet 角色..."
+
+    # 切换到 my-drosera-trap 目录
+    echo "切换到 /root/my-drosera-trap 目录..."
+    cd /root/my-drosera-trap || { echo "错误：无法切换到 /root/my-drosera-trap 目录，请确保目录存在（运行选项1安装Drosera节点）"; echo "按任意键返回主菜单..."; read -r; return; }
+
+    # 验证 src 目录存在
+    if [ ! -d "src" ]; then
+        echo "错误：src 目录不存在，请确保 Drosera 节点已正确安装（运行选项1）"
+        echo "按任意键返回主菜单..."
+        read -r
+        return
+    fi
+
+    # 提示用户输入 Discord 用户名
+    while true; do
+        echo "请输入你的 Discord 用户名（例如：user#1234，区分大小写，无前后空格）："
+        read -r DISCORD_USERNAME
+        if [ -z "$DISCORD_USERNAME" ]; then
+            echo "错误：Discord 用户名不能为空，请重新输入"
+        else
+            break
+        fi
+    done
+
+    # 定义 Trap.sol 文件内容
+    TRAP_SOL_CONTENT=$(cat << EOF
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {ITrap} from "drosera-contracts/interfaces/ITrap.sol";
+
+interface IMockResponse {
+    function isActive() external view returns (bool);
+}
+
+contract Trap is ITrap {
+    address public constant RESPONSE_CONTRACT = 0x4608Afa7f277C8E0BE232232265850d1cDeB600E;
+    string constant discordName = "$DISCORD_USERNAME"; // add your discord name here
+
+    function collect() external view returns (bytes memory) {
+        bool active = IMockResponse(RESPONSE_CONTRACT).isActive();
+        return abi.encode(active, discordName);
+    }
+
+    function shouldRespond(bytes[] calldata data) external pure returns (bool, bytes memory) {
+        // take the latest block data from collect
+        (bool active, string memory name) = abi.decode(data[0], (bool, string));
+        // will not run if the contract is not active or the discord name is not set
+        if (!active || bytes(name).length == 0) {
+            return (false, bytes(""));
+        }
+
+        return (true, abi.encode(name));
+    }
+}
+EOF
+)
+
+    # 创建或更新 src/Trap.sol 文件
+    echo "正在创建/更新 src/Trap.sol 文件..."
+    echo "$TRAP_SOL_CONTENT" > src/Trap.sol || { echo "错误：无法写入 src/Trap.sol 文件"; exit 1; }
+
+    # 验证 Trap.sol 是否正确生成
+    if [ -f "src/Trap.sol" ] && grep -q "string constant discordName = \"$DISCORD_USERNAME\";" src/Trap.sol; then
+        echo "src/Trap.sol 文件创建成功，Discord 用户名已设置为 $DISCORD_USERNAME"
+    else
+        echo "错误：src/Trap.sol 文件创建失败或 Discord 用户名未正确设置"
+        exit 1
+    fi
+
+    # 修改 drosera.toml 文件
+    echo "正在修改 drosera.toml 文件..."
+    DROsera_TOML="drosera.toml"
+    if [ ! -f "$DROsera_TOML" ]; then
+        echo "错误：未找到 drosera.toml 文件 ($DROsera_TOML)。请确保 Drosera 节点已正确安装（运行选项1）"
+        exit 1
+    fi
+
+    # 备份 drosera.toml
+    cp "$DROsera_TOML" "${DROsera_TOML}.bak" || { echo "错误：无法备份 drosera.toml 文件"; exit 1; }
+    echo "已备份 drosera.toml 到 ${DROsera_TOML}.bak"
+
+    # 更新或添加指定的配置项
+    # 更新 path
+    if grep -q "^path = " "$DROsera_TOML"; then
+        sed -i 's|^path = .*|path = "out/Trap.sol/Trap.json"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 path"; exit 1; }
+    else
+        echo 'path = "out/Trap.sol/Trap.json"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 path"; exit 1; }
+    fi
+
+    # 更新 response_contract
+    if grep -q "^response_contract = " "$DROsera_TOML"; then
+        sed -i 's|^response_contract = .*|response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_contract"; exit 1; }
+    else
+        echo 'response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_contract"; exit 1; }
+    fi
+
+    # 更新 response_function
+    if grep -q "^response_function = " "$DROsera_TOML"; then
+        sed -i 's|^response_function = .*|response_function = "respondWithDiscordName(string)"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_function"; exit 1; }
+    else
+        echo 'response_function = "respondWithDiscordName(string)"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_function"; exit 1; }
+    fi
+
+    # 验证 drosera.toml 是否正确更新
+    if [ -f "$DROsera_TOML" ] && \
+       grep -q 'path = "out/Trap.sol/Trap.json"' "$DROsera_TOML" && \
+       grep -q 'response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"' "$DROsera_TOML" && \
+       grep -q 'response_function = "respondWithDiscordName(string)"' "$DROsera_TOML"; then
+        echo "drosera.toml 文件更新成功"
+    else
+        echo "错误：drosera.toml 文件更新失败或内容未正确设置"
+        exit 1
+    fi
+
+    # 执行 forge build
+    echo "执行 forge build..."
+    forge build || { echo "forge build 失败，请确保 Foundry 已安装（运行选项1）"; exit 1; }
+    echo "forge build 完成"
+
+    # 提示用户输入 EVM 钱包私钥
+    echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
+    while true; do
+        echo "请输入 EVM 钱包私钥（隐藏输入，用于 drosera apply）："
+        read -s DROSERA_PRIVATE_KEY
+        if [ -z "$DROSERA_PRIVATE_KEY" ]; then
+            echo "错误：私钥不能为空，请重新输入"
+        else
+            break
+        fi
+    done
+
+    # 执行 drosera apply
+    echo "正在执行 drosera apply..."
+    export DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY"
+    if echo "ofc" | drosera apply; then
+        echo "drosera apply 完成"
+    else
+        echo "drosera apply 失败，请手动运行 'cd /root/my-drosera-trap && export DROSERA_PRIVATE_KEY=your_private_key && echo \"ofc\" | drosera apply' 并检查错误日志。"
+        unset DROSERA_PRIVATE_KEY
+        echo "按任意键返回主菜单..."
+        read -r
+        return
+    fi
+
+    # 提示用户输入 OWNER_ADDRESS
+    while true; do
+        echo "请输入部署 Trap 合约的主地址（OWNER_ADDRESS，例如：0x123...，用于验证 Responder 状态）："
+        read -r OWNER_ADDRESS
+        if [ -z "$OWNER_ADDRESS" ]; then
+            echo "错误：主地址不能为空，请重新输入"
+        elif [[ ! "$OWNER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            echo "错误：请输入有效的以太坊地址（以 0x 开头，42 个字符）"
+        else
+            break
+        fi
+    done
+
+    # 执行 cast call 验证 Responder 状态
+    echo "正在验证 Responder 状态..."
+    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
+    if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
+        echo "验证成功：地址 $OWNER_ADDRESS 是 Responder"
+    else
+        echo "验证失败：地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
+        echo "你可手动运行以下命令验证："
+        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
+        echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
+    fi
+
+    # 切换到 Drosera-Network 目录
+    echo "切换到 /root/Drosera-Network 目录..."
+    cd /root/Drosera-Network || { echo "错误：无法切换到 /root/Drosera-Network 目录，请确保目录存在（运行选项1安装Drosera节点）"; exit 1; }
+
+    # 验证 docker-compose.yaml 存在
+    if [ ! -f "docker-compose.yaml" ]; then
+        echo "错误：未找到 docker-compose.yaml 文件，请确保 Drosera-Network 仓库正确配置（运行选项1）"
+        exit 1
+    fi
+
+    # 启动 Docker Compose 服务
+    echo "正在启动 Docker Compose 服务..."
+    if command -v docker-compose &> /dev/null; then
+        echo "使用 docker-compose 启动服务..."
+        docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        echo "正在收集 Docker Compose 日志..."
+        docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
+    elif docker compose version &> /dev/null; then
+        echo "使用 docker compose 启动服务..."
+        docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+        echo "正在收集 Docker Compose 日志..."
+        docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
+    else
+        echo "错误：未找到 docker-compose 或 docker compose 命令，请确保 Docker Compose 已安装（运行选项1）"
+        exit 1
+    fi
+    echo "Docker Compose 服务启动完成"
+
+    # 清理私钥变量
+    unset DROSERA_PRIVATE_KEY
+    echo "私钥变量已清理"
+
+    # 提供后续步骤
+    echo "Cadet 角色配置和验证完成！请按照以下步骤获取 Cadet 角色："
+    echo "1. 确保你已加入 Drosera 的官方 Discord 服务器：https://discord.gg/drosera"
+    echo "2. 在 Discord 的认证频道（通常为 #verify 或 #authentication）中，等待 Drosera 网络验证你的提交。"
+    echo "3. 验证通过后，Discord 机器人会自动分配 Cadet 角色。"
+    echo "注意："
+    echo "- 如果长时间未获得角色，请检查 Holesky 测试网交易状态或在 Discord 中联系 Drosera 团队。"
+    echo "- 如果 Responder 验证失败，可稍后重试 cast call 命令或确认 OWNER_ADDRESS 正确性。"
+    echo "- 可查看 $PWD/drosera.log 检查 Docker Compose 服务状态。"
+
+    echo "按任意键返回主菜单..."
+    read -r
+}
+
 # 主菜单函数
 function main_menu() {
     while true; do
@@ -562,14 +783,16 @@ function main_menu() {
         echo "2. 查看 drosera-node 日志"
         echo "3. 重启 Operators"
         echo "4. 升级到1.17并修改 drosera_rpc"
-        echo -n "请输入选项 (1-4): "
+        echo "5. 获取Cadet角色"
+        echo -n "请输入选项 (1-5): "
         read -r choice
         case $choice in
             1) install_drosera_node ;;
             2) view_logs ;;
             3) restart_operators ;;
             4) upgrade_to_1_17 ;;
-            *) echo "无效选项，请输入 1、2、3 或 4" ; sleep 2 ;;
+            5) claim_cadet_role ;;
+            *) echo "无效选项，请输入 1、2、3 或 4、5" ; sleep 2 ;;
         esac
     done
 }
