@@ -709,6 +709,32 @@ EOF
 
     echo "按任意键返回主菜单..."
     read -r
+
+    # 获取 Discord 用户名列表
+    echo "正在获取已注册的 Discord 用户名列表..."
+    source /root/.bashrc
+    DISCORD_NAMES=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "getDiscordNamesBatch(uint256,uint256)(string[])" 0 2000 --rpc-url https://ethereum-holesky-rpc.publicnode.com/ 2>/dev/null)
+    
+    if [ $? -eq 0 ]; then
+        echo "已注册的 Discord 用户名列表："
+        echo "$DISCORD_NAMES" | tr ',' '\n' | sed 's/\[//g' | sed 's/\]//g' | sed 's/"//g' | grep -v "^$" | sort | uniq
+        echo
+        echo "正在检查你的 Discord 用户名是否已注册..."
+        if echo "$DISCORD_NAMES" | grep -q "\"$DISCORD_USERNAME\""; then
+            echo "找到你的 Discord 用户名：$DISCORD_USERNAME"
+        else
+            echo "未找到你的 Discord 用户名：$DISCORD_USERNAME"
+            echo "请确保："
+            echo "1. Discord 用户名输入正确（区分大小写）"
+            echo "2. 等待几分钟后重试，因为链上数据可能需要时间同步"
+            echo "3. 如果问题持续，请在 Discord 中联系 Drosera 团队"
+        fi
+    else
+        echo "获取 Discord 用户名列表失败，请稍后重试"
+    fi
+    
+    echo "按任意键返回主菜单..."
+    read -r
 }
 
 # 主菜单函数
