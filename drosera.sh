@@ -29,24 +29,6 @@ validate_yaml() {
     echo "文件 $file 的 YAML 语法验证通过"
 }
 
-# 函数：检查 Holesky ETH 余额
-check_holesky_balance() {
-    local address=$1
-    local balance=$(cast balance "$address" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
-    if [ $? -eq 0 ]; then
-        echo "当前 Holesky ETH 余额: $(echo "scale=6; $balance/1000000000000000000" | bc) ETH"
-        if (( balance < 50000000000000000 )); then
-            echo "警告：余额较低，建议至少保持 0.05 ETH 以确保交易成功"
-            echo "请访问 https://holesky-faucet.pk910.de/ 获取测试网 ETH"
-            return 1
-        fi
-        return 0
-    else
-        echo "错误：无法获取余额信息"
-        return 1
-    fi
-}
-
 # 函数：获取 EVM 钱包地址
 get_evm_address() {
     local private_key=$1
@@ -159,31 +141,6 @@ check_system_requirements
 
 # 检查网络连接
 check_network || { echo "按任意键退出..."; read -r; exit 1; }
-
-# 提示用户输入 OWNER_ADDRESS
-while true; do
-    echo "请输入你的 EVM 钱包地址（用于验证 Responder 状态，例如：0x123...）："
-    read -r OWNER_ADDRESS
-    if [ -z "$OWNER_ADDRESS" ]; then
-        echo "错误：EVM 钱包地址不能为空，请重新输入"
-    elif [[ ! "$OWNER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        echo "错误：请输入有效的 EVM 钱包地址（以 0x 开头，42 个字符）"
-    else
-        break
-    fi
-done
-
-# 执行 cast call 验证 Responder 状态
-echo "正在验证 Responder 状态..."
-CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
-if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
-    echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
-else
-    echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
-    echo "你可手动运行以下命令验证："
-    echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
-    echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
-fi
 
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
@@ -315,14 +272,13 @@ function install_drosera_node() {
     forge build || { echo "forge build 失败"; exit 1; }
     echo "forge build 完成"
 
-    # 获取私钥并验证余额
-    echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
+    # 获取私钥
+    echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
     DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入）：")
     EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
-        check_holesky_balance "$EVM_ADDRESS" || { echo "按任意键继续..."; read -r; }
     else
         echo "错误：无法获取 EVM 地址"
         exit 1
@@ -342,13 +298,84 @@ function install_drosera_node() {
     echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
     read -r CONTINUE
     if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
-        # 执行后续步骤...
-        # [后续代码将在下一部分添加]
+        # 执行 drosera dryrun
+        echo "正在执行 drosera dryrun..."
+        if echo "ofc" | drosera dryrun; then
+            echo "drosera dryrun 完成"
+        else
+            echo "drosera dryrun 失败，请检查错误信息"
+            exit 1
+        fi
+
+        # 执行第二次 drosera apply
+        echo "正在执行第二次 drosera apply..."
+        if echo "ofc" | drosera apply; then
+            echo "第二次 drosera apply 完成"
+        else
+            echo "第二次 drosera apply 失败，请检查错误信息"
+            exit 1
+        fi
+
+        # 安装 Drosera Operator
+        echo "正在安装 Drosera Operator..."
+        cd /root || { echo "切换到 /root 目录失败"; exit 1; }
+        git clone https://github.com/drosera-network/drosera-operator.git || { echo "克隆 Drosera Operator 仓库失败"; exit 1; }
+        cd drosera-operator || { echo "切换到 drosera-operator 目录失败"; exit 1; }
+        bun install || { echo "bun install 失败"; exit 1; }
+        echo "Drosera Operator 安装完成"
+
+        # 注册 Drosera Operator
+        echo "正在注册 Drosera Operator..."
+        if bun run register; then
+            echo "Drosera Operator 注册完成"
+        else
+            echo "Drosera Operator 注册失败，请检查错误信息"
+            exit 1
+        fi
+
+        # 配置 Drosera-Network 仓库
+        echo "正在配置 Drosera-Network 仓库..."
+        cd /root || { echo "切换到 /root 目录失败"; exit 1; }
+        git clone https://github.com/drosera-network/drosera-network.git || { echo "克隆 Drosera-Network 仓库失败"; exit 1; }
+        cd drosera-network || { echo "切换到 drosera-network 目录失败"; exit 1; }
+        echo "Drosera-Network 仓库配置完成"
+
+        # 启动 Docker Compose 服务
+        echo "正在启动 Docker Compose 服务..."
+        if command -v docker-compose &> /dev/null; then
+            echo "使用 docker-compose 启动服务..."
+            docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            echo "正在收集 Docker Compose 日志..."
+            docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
+        elif docker compose version &> /dev/null; then
+            echo "使用 docker compose 启动服务..."
+            docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
+            echo "正在收集 Docker Compose 日志..."
+            docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
+            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
+        else
+            echo "错误：未找到 docker-compose 或 docker compose 命令"
+            exit 1
+        fi
+        echo "Docker Compose 服务启动完成"
+
+        echo "所有后续步骤已完成！"
+        echo "你可以使用以下命令查看服务状态："
+        echo "1. 查看 drosera-node 日志：docker logs -f drosera-node"
+        echo "2. 查看 Docker Compose 日志：cat $PWD/drosera.log"
+        echo "3. 重启服务：cd /root/drosera-network && docker-compose restart"
     else
         echo "用户选择退出，安装 Drosera 节点结束。"
         unset DROSERA_PRIVATE_KEY
         return
     fi
+
+    # 清理私钥变量
+    unset DROSERA_PRIVATE_KEY
+    echo "私钥变量已清理"
+    echo "按任意键返回主菜单..."
+    read -r
 }
 
 # 命令2：查看日志
@@ -454,14 +481,13 @@ function upgrade_to_1_17() {
         exit 1
     fi
 
-    # 获取私钥并验证余额
-    echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
+    # 获取私钥
+    echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
     DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入）：")
     EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
-        check_holesky_balance "$EVM_ADDRESS" || { echo "按任意键继续..."; read -r; }
     else
         echo "错误：无法获取 EVM 地址"
         exit 1
@@ -492,6 +518,31 @@ function upgrade_to_1_17() {
 # 命令5：获取Cadet角色
 function claim_cadet_role() {
     echo "正在准备获取 Drosera Cadet 角色..."
+
+    # 提示用户输入 EVM 钱包地址
+    while true; do
+        echo "请输入你的 EVM 钱包地址（用于验证 Responder 状态，例如：0x123...）："
+        read -r OWNER_ADDRESS
+        if [ -z "$OWNER_ADDRESS" ]; then
+            echo "错误：EVM 钱包地址不能为空，请重新输入"
+        elif [[ ! "$OWNER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            echo "错误：请输入有效的 EVM 钱包地址（以 0x 开头，42 个字符）"
+        else
+            break
+        fi
+    done
+
+    # 执行 cast call 验证 Responder 状态
+    echo "正在验证 Responder 状态..."
+    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
+    if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
+        echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
+    else
+        echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
+        echo "你可手动运行以下命令验证："
+        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
+        echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
+    fi
 
     # 切换到 my-drosera-trap 目录
     echo "切换到 /root/my-drosera-trap 目录..."
@@ -612,14 +663,13 @@ EOF
     forge build || { echo "forge build 失败，请确保 Foundry 已安装（运行选项1）"; exit 1; }
     echo "forge build 完成"
 
-    # 获取私钥并验证余额
-    echo "请确保你的钱包地址在 Holesky 测试网上有足够的 ETH 用于交易。"
+    # 获取私钥
+    echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
     DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入，用于 drosera apply）：")
     EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
-        check_holesky_balance "$EVM_ADDRESS" || { echo "按任意键继续..."; read -r; }
     else
         echo "错误：无法获取 EVM 地址"
         exit 1
