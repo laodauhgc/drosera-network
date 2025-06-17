@@ -255,11 +255,14 @@ function install_drosera_node() {
 
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
-    DROSERA_PRIVATE_KEY=$(read -r pk && echo "$pk")
+    read -r DROSERA_PRIVATE_KEY
+    
+    # 移除可能存在的0x前缀
+    DROSERA_PRIVATE_KEY=${DROSERA_PRIVATE_KEY#0x}
     
     # 验证私钥格式
     if [[ ! "$DROSERA_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
-        echo "错误：私钥格式不正确，应为64个十六进制字符"
+        echo "错误：私钥格式不正确，应为64个十六进制字符（可以带0x前缀）"
         return 1
     fi
     
@@ -471,7 +474,7 @@ function upgrade_to_1_17() {
 
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
-    DROSERA_PRIVATE_KEY=$(read -r pk && echo "$pk")
+    read -r DROSERA_PRIVATE_KEY
     
     # 移除可能存在的0x前缀
     DROSERA_PRIVATE_KEY=${DROSERA_PRIVATE_KEY#0x}
@@ -479,9 +482,7 @@ function upgrade_to_1_17() {
     # 验证私钥格式
     if [[ ! "$DROSERA_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
         echo "错误：私钥格式不正确，应为64个十六进制字符（可以带0x前缀）"
-        echo "按任意键返回主菜单..."
-        read -r
-        return
+        return 1
     fi
     
     # 获取 EVM 地址
@@ -490,9 +491,7 @@ function upgrade_to_1_17() {
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
     else
         echo "错误：无法获取 EVM 地址"
-        echo "按任意键返回主菜单..."
-        read -r
-        return
+        return 1
     fi
 
     # 执行 drosera apply
@@ -533,18 +532,6 @@ function claim_cadet_role() {
             break
         fi
     done
-
-    # 执行 cast call 验证 Responder 状态
-    echo "正在验证 Responder 状态..."
-    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
-    if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
-        echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
-    else
-        echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
-        echo "你可手动运行以下命令验证："
-        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
-        echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
-    fi
 
     # 切换到 my-drosera-trap 目录
     echo "切换到 /root/my-drosera-trap 目录..."
@@ -680,10 +667,20 @@ EOF
         return
     fi
     
-    # 获取 EVM 地址
+    # 获取 EVM 地址并验证是否匹配
     EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
+        # 转换为小写进行比较
+        if [[ "${EVM_ADDRESS,,}" != "${OWNER_ADDRESS,,}" ]]; then
+            echo "错误：输入的私钥对应的地址与之前输入的EVM钱包地址不匹配"
+            echo "之前输入的地址: $OWNER_ADDRESS"
+            echo "私钥对应的地址: $EVM_ADDRESS"
+            echo "请确保使用正确的私钥"
+            echo "按任意键返回主菜单..."
+            read -r
+            return
+        fi
     else
         echo "错误：无法获取 EVM 地址"
         echo "按任意键返回主菜单..."
@@ -702,31 +699,6 @@ EOF
         echo "按任意键返回主菜单..."
         read -r
         return
-    fi
-
-    # 提示用户输入 EVM 钱包地址
-    while true; do
-        echo "请输入你的 EVM 钱包地址（用于验证 Responder 状态，例如：0x123...）："
-        read -r OWNER_ADDRESS
-        if [ -z "$OWNER_ADDRESS" ]; then
-            echo "错误：EVM 钱包地址不能为空，请重新输入"
-        elif [[ ! "$OWNER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-            echo "错误：请输入有效的 EVM 钱包地址（以 0x 开头，42 个字符）"
-        else
-            break
-        fi
-    done
-
-    # 执行 cast call 验证 Responder 状态
-    echo "正在验证 Responder 状态..."
-    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
-    if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
-        echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
-    else
-        echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
-        echo "你可手动运行以下命令验证："
-        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
-        echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
     fi
 
     # 切换到 Drosera-Network 目录
@@ -773,8 +745,17 @@ EOF
     echo "- 如果 Responder 验证失败，可稍后重试 cast call 命令或确认 EVM 钱包地址正确性。"
     echo "- 可查看 $PWD/drosera.log 检查 Docker Compose 服务状态。"
 
-    echo "按任意键返回主菜单..."
-    read -r
+    # 执行 cast call 验证 Responder 状态
+    echo "正在验证 Responder 状态..."
+    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
+    if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
+        echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
+    else
+        echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
+        echo "你可手动运行以下命令验证："
+        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
+        echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
+    fi
 
     # 获取 Discord 用户名列表
     echo "正在获取已注册的 Discord 用户名列表..."
