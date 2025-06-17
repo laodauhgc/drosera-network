@@ -32,7 +32,8 @@ validate_yaml() {
 # 函数：获取 EVM 钱包地址
 get_evm_address() {
     local private_key=$1
-    local address=$(cast wallet address --private-key "$private_key" 2>/dev/null)
+    local address
+    address=$(cast wallet address --private-key "$private_key" 2>/dev/null)
     if [ $? -eq 0 ]; then
         echo "$address"
         return 0
@@ -54,23 +55,9 @@ validate_evm_address() {
 
 # 函数：安全输入私钥
 get_private_key() {
-    local prompt=$1
-    local private_key
-    while true; do
-        echo -n "$prompt"
-        read -s private_key
-        echo
-        if [ -z "$private_key" ]; then
-            echo "错误：私钥不能为空，请重新输入"
-            continue
-        fi
-        # 验证私钥格式（64个十六进制字符）
-        if [[ ! "$private_key" =~ ^[0-9a-fA-F]{64}$ ]]; then
-            echo "错误：私钥格式不正确，应为64个十六进制字符"
-            continue
-        fi
-        break
-    done
+    local private_key=""
+    echo "请输入你的私钥（64个十六进制字符）："
+    read private_key
     echo "$private_key"
 }
 
@@ -135,12 +122,6 @@ cleanup() {
 
 # 设置退出时清理
 trap cleanup EXIT
-
-# 检查系统要求
-check_system_requirements
-
-# 检查网络连接
-check_network || { echo "按任意键退出..."; read -r; exit 1; }
 
 # 命令1：安装 Drosera 节点
 function install_drosera_node() {
@@ -274,14 +255,21 @@ function install_drosera_node() {
 
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
-    DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入）：")
-    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
+    DROSERA_PRIVATE_KEY=$(read -r pk && echo "$pk")
     
+    # 验证私钥格式
+    if [[ ! "$DROSERA_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "错误：私钥格式不正确，应为64个十六进制字符"
+        return 1
+    fi
+    
+    # 获取 EVM 地址
+    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
     else
         echo "错误：无法获取 EVM 地址"
-        exit 1
+        return 1
     fi
 
     # 执行第一次 drosera apply
@@ -483,14 +471,28 @@ function upgrade_to_1_17() {
 
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
-    DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入）：")
-    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
+    DROSERA_PRIVATE_KEY=$(read -r pk && echo "$pk")
     
+    # 移除可能存在的0x前缀
+    DROSERA_PRIVATE_KEY=${DROSERA_PRIVATE_KEY#0x}
+    
+    # 验证私钥格式
+    if [[ ! "$DROSERA_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "错误：私钥格式不正确，应为64个十六进制字符（可以带0x前缀）"
+        echo "按任意键返回主菜单..."
+        read -r
+        return
+    fi
+    
+    # 获取 EVM 地址
+    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
     else
         echo "错误：无法获取 EVM 地址"
-        exit 1
+        echo "按任意键返回主菜单..."
+        read -r
+        return
     fi
 
     # 执行 drosera apply
@@ -665,14 +667,28 @@ EOF
 
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
-    DROSERA_PRIVATE_KEY=$(get_private_key "请输入 EVM 钱包私钥（隐藏输入，用于 drosera apply）：")
-    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
+    read -r DROSERA_PRIVATE_KEY
     
+    # 移除可能存在的0x前缀
+    DROSERA_PRIVATE_KEY=${DROSERA_PRIVATE_KEY#0x}
+    
+    # 验证私钥格式
+    if [[ ! "$DROSERA_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "错误：私钥格式不正确，应为64个十六进制字符（可以带0x前缀）"
+        echo "按任意键返回主菜单..."
+        read -r
+        return
+    fi
+    
+    # 获取 EVM 地址
+    EVM_ADDRESS=$(get_evm_address "$DROSERA_PRIVATE_KEY")
     if [ $? -eq 0 ]; then
         echo "你的 EVM 钱包地址: $EVM_ADDRESS"
     else
         echo "错误：无法获取 EVM 地址"
-        exit 1
+        echo "按任意键返回主菜单..."
+        read -r
+        return
     fi
 
     # 执行 drosera apply
