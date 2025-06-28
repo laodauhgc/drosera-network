@@ -253,6 +253,54 @@ function install_drosera_node() {
     forge build || { echo "forge build 失败"; exit 1; }
     echo "forge build 完成"
 
+    # 修改 drosera.toml 文件配置
+    echo "正在修改 drosera.toml 文件配置..."
+    DROsera_TOML="drosera.toml"
+    if [ ! -f "$DROsera_TOML" ]; then
+        echo "错误：未找到 drosera.toml 文件 ($DROsera_TOML)。请确保 Drosera 安装正确并生成了配置文件。"
+        exit 1
+    fi
+
+    # 备份 drosera.toml
+    cp "$DROsera_TOML" "${DROsera_TOML}.bak" || { echo "错误：无法备份 drosera.toml 文件"; exit 1; }
+    echo "已备份 drosera.toml 到 ${DROsera_TOML}.bak"
+
+    # 更新 ethereum_rpc
+    if grep -q "^ethereum_rpc = " "$DROsera_TOML"; then
+        sed -i 's|^ethereum_rpc = .*|ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 ethereum_rpc"; exit 1; }
+    else
+        echo 'ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 ethereum_rpc"; exit 1; }
+    fi
+
+    # 修改 drosera.toml 中的 drosera_rpc
+    DROsera_RPC="https://relay.hoodi.drosera.io"
+    echo "正在更新 drosera.toml 中的 drosera_rpc 配置..."
+    if grep -q "^drosera_rpc = " "$DROsera_TOML"; then
+        sed -i "s|^drosera_rpc = .*|drosera_rpc = \"$DROsera_RPC\"|" "$DROsera_TOML"
+        echo "已更新 drosera_rpc 为 $DROsera_RPC"
+    else
+        echo "drosera_rpc = \"$DROsera_RPC\"" >> "$DROsera_TOML"
+        echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
+    fi
+
+    # 更新 response_contract
+    if grep -q "^response_contract = " "$DROsera_TOML"; then
+        sed -i 's|^response_contract = .*|response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_contract"; exit 1; }
+    else
+        echo 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_contract"; exit 1; }
+    fi
+
+    # 验证 drosera.toml 是否正确更新
+    if [ -f "$DROsera_TOML" ] && \
+       grep -q 'ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"' "$DROsera_TOML" && \
+       grep -q 'drosera_rpc = "https://relay.hoodi.drosera.io"' "$DROsera_TOML" && \
+       grep -q 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' "$DROsera_TOML"; then
+        echo "drosera.toml 文件配置更新成功"
+    else
+        echo "错误：drosera.toml 文件配置更新失败或内容未正确设置"
+        exit 1
+    fi
+
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
     read -r DROSERA_PRIVATE_KEY
@@ -454,7 +502,7 @@ function upgrade_to_1_17() {
     fi
 
     # 修改 drosera.toml 中的 drosera_rpc
-    DROsera_RPC="https://relay.testnet.drosera.io"
+    DROsera_RPC="https://relay.hoodi.drosera.io"
     echo "正在更新 drosera.toml 中的 drosera_rpc 配置..."
     if grep -q "^drosera_rpc = " "$DROsera_TOML"; then
         sed -i "s|^drosera_rpc = .*|drosera_rpc = \"$DROsera_RPC\"|" "$DROsera_TOML"
@@ -568,7 +616,7 @@ interface IMockResponse {
 }
 
 contract Trap is ITrap {
-    address public constant RESPONSE_CONTRACT = 0x4608Afa7f277C8E0BE232232265850d1cDeB600E;
+    address public constant RESPONSE_CONTRACT = 0x183D78491555cb69B68d2354F7373cc2632508C7;
     string constant discordName = "$DISCORD_USERNAME"; // add your discord name here
 
     function collect() external view returns (bytes memory) {
@@ -624,9 +672,9 @@ EOF
 
     # 更新 response_contract
     if grep -q "^response_contract = " "$DROsera_TOML"; then
-        sed -i 's|^response_contract = .*|response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_contract"; exit 1; }
+        sed -i 's|^response_contract = .*|response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_contract"; exit 1; }
     else
-        echo 'response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_contract"; exit 1; }
+        echo 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_contract"; exit 1; }
     fi
 
     # 更新 response_function
@@ -639,7 +687,7 @@ EOF
     # 验证 drosera.toml 是否正确更新
     if [ -f "$DROsera_TOML" ] && \
        grep -q 'path = "out/Trap.sol/Trap.json"' "$DROsera_TOML" && \
-       grep -q 'response_contract = "0x4608Afa7f277C8E0BE232232265850d1cDeB600E"' "$DROsera_TOML" && \
+       grep -q 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' "$DROsera_TOML" && \
        grep -q 'response_function = "respondWithDiscordName(string)"' "$DROsera_TOML"; then
         echo "drosera.toml 文件更新成功"
     else
@@ -747,20 +795,20 @@ EOF
 
     # 执行 cast call 验证 Responder 状态
     echo "正在验证 Responder 状态..."
-    CAST_CALL_RESULT=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
+    CAST_CALL_RESULT=$(cast call 0x183D78491555cb69B68d2354F7373cc2632508C7 "isResponder(address)(bool)" "$OWNER_ADDRESS" --rpc-url https://ethereum-holesky-rpc.publicnode.com 2>/dev/null)
     if [ $? -eq 0 ] && [ "$CAST_CALL_RESULT" = "true" ]; then
         echo "验证成功：EVM 钱包地址 $OWNER_ADDRESS 是 Responder"
     else
         echo "验证失败：EVM 钱包地址 $OWNER_ADDRESS 不是 Responder 或 cast call 出错。请检查地址是否正确，或稍后重试。"
         echo "你可手动运行以下命令验证："
-        echo "cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
+        echo "cast call 0x183D78491555cb69B68d2354F7373cc2632508C7 \"isResponder(address)(bool)\" $OWNER_ADDRESS --rpc-url https://ethereum-holesky-rpc.publicnode.com"
         echo "继续执行后续步骤，但请在 Discord 验证前确认 Responder 状态。"
     fi
 
     # 获取 Discord 用户名列表
     echo "正在获取已注册的 Discord 用户名列表..."
     source /root/.bashrc
-    DISCORD_NAMES=$(cast call 0x4608Afa7f277C8E0BE232232265850d1cDeB600E "getDiscordNamesBatch(uint256,uint256)(string[])" 0 2000 --rpc-url https://ethereum-holesky-rpc.publicnode.com/ 2>/dev/null)
+    DISCORD_NAMES=$(cast call 0x183D78491555cb69B68d2354F7373cc2632508C7 "getDiscordNamesBatch(uint256,uint256)(string[])" 0 2000 --rpc-url https://ethereum-holesky-rpc.publicnode.com/ 2>/dev/null)
     
     if [ $? -eq 0 ]; then
         echo "已注册的 Discord 用户名列表："
