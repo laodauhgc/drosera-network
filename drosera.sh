@@ -265,42 +265,6 @@ function install_drosera_node() {
     cp "$DROsera_TOML" "${DROsera_TOML}.bak" || { echo "错误：无法备份 drosera.toml 文件"; exit 1; }
     echo "已备份 drosera.toml 到 ${DROsera_TOML}.bak"
 
-    # 更新 ethereum_rpc
-    if grep -q "^ethereum_rpc = " "$DROsera_TOML"; then
-        sed -i 's|^ethereum_rpc = .*|ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 ethereum_rpc"; exit 1; }
-    else
-        echo 'ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 ethereum_rpc"; exit 1; }
-    fi
-
-    # 修改 drosera.toml 中的 drosera_rpc
-    DROsera_RPC="https://relay.hoodi.drosera.io"
-    echo "正在更新 drosera.toml 中的 drosera_rpc 配置..."
-    if grep -q "^drosera_rpc = " "$DROsera_TOML"; then
-        sed -i "s|^drosera_rpc = .*|drosera_rpc = \"$DROsera_RPC\"|" "$DROsera_TOML"
-        echo "已更新 drosera_rpc 为 $DROsera_RPC"
-    else
-        echo "drosera_rpc = \"$DROsera_RPC\"" >> "$DROsera_TOML"
-        echo "已添加 drosera_rpc = $DROsera_RPC 到 drosera.toml"
-    fi
-
-    # 更新 response_contract
-    if grep -q "^response_contract = " "$DROsera_TOML"; then
-        sed -i 's|^response_contract = .*|response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"|' "$DROsera_TOML" || { echo "错误：无法更新 drosera.toml 的 response_contract"; exit 1; }
-    else
-        echo 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' >> "$DROsera_TOML" || { echo "错误：无法添加 drosera.toml 的 response_contract"; exit 1; }
-    fi
-
-    # 验证 drosera.toml 是否正确更新
-    if [ -f "$DROsera_TOML" ] && \
-       grep -q 'ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"' "$DROsera_TOML" && \
-       grep -q 'drosera_rpc = "https://relay.hoodi.drosera.io"' "$DROsera_TOML" && \
-       grep -q 'response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"' "$DROsera_TOML"; then
-        echo "drosera.toml 文件配置更新成功"
-    else
-        echo "错误：drosera.toml 文件配置更新失败或内容未正确设置"
-        exit 1
-    fi
-
     # 获取私钥
     echo "请输入你的 EVM 钱包私钥（用于 drosera apply）："
     read -r DROSERA_PRIVATE_KEY
@@ -323,6 +287,21 @@ function install_drosera_node() {
         return 1
     fi
 
+    # 自动写入 whitelist 字段
+    if grep -q "^whitelist = " "$DROsera_TOML"; then
+        # whitelist 字段已存在，直接替换
+        sed -i "s|^whitelist = .*|whitelist = [\"$EVM_ADDRESS\"]|" "$DROsera_TOML"
+    else
+        # whitelist 字段不存在，追加到 traps.mytrap 段落后
+        awk -v addr="$EVM_ADDRESS" '
+        BEGIN{added=0}
+        /^\[traps\.mytrap\]/ {print; getline; print; print "whitelist = [\"" addr "\"]"; added=1; next}
+        {print}
+        END{if(!added) print "whitelist = [\"" addr "\"]"}
+        ' "$DROsera_TOML" > "${DROsera_TOML}.tmp" && mv "${DROsera_TOML}.tmp" "$DROsera_TOML"
+    fi
+    echo "已将 $EVM_ADDRESS 写入 drosera.toml 的 whitelist 字段"
+
     # 执行第一次 drosera apply
     echo "正在执行第一次 drosera apply..."
     export DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY"
@@ -333,86 +312,108 @@ function install_drosera_node() {
         exit 1
     fi
 
-    # 询问用户是否继续进行下一步
-    echo "所有操作已完成，是否继续进行下一步（drosera dryrun、第二次 drosera apply、Drosera Operator 安装和注册、配置 Drosera-Network 仓库、启动 Docker Compose 服务）？（y/n）"
-    read -r CONTINUE
-    if [ "$CONTINUE" = "y" ] || [ "$CONTINUE" = "Y" ]; then
-        # 执行 drosera dryrun
-        echo "正在执行 drosera dryrun..."
-        if echo "ofc" | drosera dryrun; then
-            echo "drosera dryrun 完成"
-        else
-            echo "drosera dryrun 失败，请检查错误信息"
-            exit 1
+    # 获取 trap_address
+    echo "正在获取 trap 地址..."
+    trap_address=$(cat drosera.log | grep -oP 'trapAddress: \K0x[a-fA-F0-9]{40}' | tail -1)
+    while [ -z "$trap_address" ]; do
+        echo "未能自动获取 trap 地址，请手动输入 trap 地址（以0x开头，42位）："
+        read -r trap_address
+        if [[ ! "$trap_address" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            echo "输入格式不正确，请重新输入。"
+            trap_address=""
         fi
+    done
+    echo "已获取 trap 地址：$trap_address"
 
-        # 执行第二次 drosera apply
-        echo "正在执行第二次 drosera apply..."
-        if echo "ofc" | drosera apply; then
-            echo "第二次 drosera apply 完成"
-        else
-            echo "第二次 drosera apply 失败，请检查错误信息"
-            exit 1
-        fi
+    # 让用户输入 ETH 数量
+    echo "请输入要存入 Hoodi 的 ETH 数量（如 0.01）："
+    read -r eth_amount
 
-        # 安装 Drosera Operator
-        echo "正在安装 Drosera Operator..."
-        cd /root || { echo "切换到 /root 目录失败"; exit 1; }
-        git clone https://github.com/drosera-network/drosera-operator.git || { echo "克隆 Drosera Operator 仓库失败"; exit 1; }
-        cd drosera-operator || { echo "切换到 drosera-operator 目录失败"; exit 1; }
-        bun install || { echo "bun install 失败"; exit 1; }
-        echo "Drosera Operator 安装完成"
-
-        # 注册 Drosera Operator
-        echo "正在注册 Drosera Operator..."
-        if bun run register; then
-            echo "Drosera Operator 注册完成"
-        else
-            echo "Drosera Operator 注册失败，请检查错误信息"
-            exit 1
-        fi
-
-        # 配置 Drosera-Network 仓库
-        echo "正在配置 Drosera-Network 仓库..."
-        cd /root || { echo "切换到 /root 目录失败"; exit 1; }
-        git clone https://github.com/drosera-network/drosera-network.git || { echo "克隆 Drosera-Network 仓库失败"; exit 1; }
-        cd drosera-network || { echo "切换到 drosera-network 目录失败"; exit 1; }
-        echo "Drosera-Network 仓库配置完成"
-
-        # 启动 Docker Compose 服务
-        echo "正在启动 Docker Compose 服务..."
-        if command -v docker-compose &> /dev/null; then
-            echo "使用 docker-compose 启动服务..."
-            docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
-            echo "正在收集 Docker Compose 日志..."
-            docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
-            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
-        elif docker compose version &> /dev/null; then
-            echo "使用 docker compose 启动服务..."
-            docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
-            echo "正在收集 Docker Compose 日志..."
-            docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
-            echo "Docker Compose 日志已保存到 $PWD/drosera.log"
-        else
-            echo "错误：未找到 docker-compose 或 docker compose 命令"
-            exit 1
-        fi
-        echo "Docker Compose 服务启动完成"
-
-        echo "所有后续步骤已完成！"
-        echo "你可以使用以下命令查看服务状态："
-        echo "1. 查看 drosera-node 日志：docker logs -f drosera-node"
-        echo "2. 查看 Docker Compose 日志：cat $PWD/drosera.log"
-        echo "3. 重启服务：cd /root/drosera-network && docker-compose restart"
+    # 执行 bloomboost
+    echo "正在为 Hoodi 存入 ETH..."
+    export DROSERA_PRIVATE_KEY="$DROSERA_PRIVATE_KEY"
+    drosera bloomboost --trap-address "$trap_address" --eth-amount "$eth_amount"
+    if [ $? -eq 0 ]; then
+        echo "bloomboost 成功，继续后续操作..."
     else
-        echo "用户选择退出，安装 Drosera 节点结束。"
-        unset DROSERA_PRIVATE_KEY
-        return
+        echo "bloomboost 失败，请检查 ETH 余额或网络后重试"
+        exit 1
     fi
 
-    # 清理私钥变量
-    unset DROSERA_PRIVATE_KEY
-    echo "私钥变量已清理"
+    # 克隆 Drosera-Network 仓库
+    echo "正在克隆 Drosera-Network 仓库..."
+    cd /root || { echo "切换到 /root 目录失败"; exit 1; }
+    if [ -d "Drosera-Network" ]; then
+        echo "检测到 Drosera-Network 目录已存在，正在删除..."
+        rm -rf Drosera-Network
+    fi
+    git clone https://github.com/sdohuajia/Drosera-Network.git || { echo "克隆 Drosera-Network 仓库失败"; exit 1; }
+    cd Drosera-Network || { echo "切换到 Drosera-Network 目录失败"; exit 1; }
+    echo "Drosera-Network 仓库克隆并进入成功"
+
+    # 复制 .env.example 为 .env
+    if [ -f ".env.example" ]; then
+        cp .env.example .env
+        echo ".env.example 已复制为 .env"
+    else
+        echo "未找到 .env.example 文件，无法生成 .env"
+        exit 1
+    fi
+
+    # 写入私钥和服务器IP到 .env
+    # 替换 ETH_PRIVATE_KEY
+    sed -i "s|^ETH_PRIVATE_KEY=.*|ETH_PRIVATE_KEY=$DROSERA_PRIVATE_KEY|" .env
+    # 获取公网IP
+    vps_ip=$(curl -s ifconfig.me || curl -s ipinfo.io/ip)
+    if [ -z "$vps_ip" ]; then
+        echo "未能自动获取服务器公网IP，请手动输入："
+        read -r vps_ip
+    fi
+    # 替换 VPS_IP
+    sed -i "s|^VPS_IP=.*|VPS_IP=$vps_ip|" .env
+    echo "已将私钥和服务器IP写入 .env 文件"
+
+    # 拉取 Drosera Operator 镜像
+    echo "正在拉取 Drosera Operator 镜像..."
+    docker pull ghcr.io/drosera-network/drosera-operator:latest || { echo "镜像拉取失败，请检查网络或Docker配置"; exit 1; }
+    echo "Drosera Operator 镜像拉取完成"
+
+    # 停止并清理旧容器，启动服务
+    echo "正在关闭并清理旧的 Docker Compose 服务..."
+    docker compose down -v
+    echo "检查并停止/删除 drosera-node 容器（如存在）..."
+    docker stop drosera-node 2>/dev/null || true
+    docker rm drosera-node 2>/dev/null || true
+    echo "启动 Drosera Operator 服务..."
+    docker compose up -d || { echo "Docker Compose 启动失败"; exit 1; }
+    echo "Drosera Operator 服务已启动"
+
+    # 注册 Operator
+    echo "正在注册 Drosera Operator..."
+    docker run -it --rm ghcr.io/drosera-network/drosera-operator:latest register \
+      --eth-chain-id 560048 \
+      --eth-rpc-url https://0xrpc.io/hoodi \
+      --drosera-address 0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D \
+      --eth-private-key $DROSERA_PRIVATE_KEY
+    echo "Drosera Operator 注册命令已执行"
+
+    # 执行 drosera-operator optin
+    echo "正在执行 drosera-operator optin..."
+    if drosera-operator optin \
+      --eth-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
+      --eth-private-key $DROSERA_PRIVATE_KEY \
+      --trap-config-address $trap_address
+    then
+        echo "drosera-operator optin 命令已执行"
+    else
+        echo "drosera-operator optin 执行失败。你可以到 Drosera 面板上手动执行 optin 操作。"
+    fi
+
+    echo "所有后续步骤已完成！"
+    echo "你可以使用以下命令查看服务状态："
+    echo "1. 查看 drosera-node 日志：docker logs -f drosera-node"
+    echo "2. 查看 Docker Compose 日志：cat $PWD/drosera.log"
+    echo "3. 重启服务：cd /root/drosera-network && docker-compose restart"
     echo "按任意键返回主菜单..."
     read -r
 }
@@ -761,23 +762,7 @@ EOF
 
     # 启动 Docker Compose 服务
     echo "正在启动 Docker Compose 服务..."
-    if command -v docker-compose &> /dev/null; then
-        echo "使用 docker-compose 启动服务..."
-        docker-compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
-        echo "正在收集 Docker Compose 日志..."
-        docker-compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
-        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
-    elif docker compose version &> /dev/null; then
-        echo "使用 docker compose 启动服务..."
-        docker compose -f docker-compose.yaml up -d || { echo "Docker Compose 服务启动失败"; exit 1; }
-        echo "正在收集 Docker Compose 日志..."
-        docker compose -f docker-compose.yaml logs --no-color > drosera.log 2>&1 || { echo "无法收集 Docker Compose 日志"; exit 1; }
-        echo "Docker Compose 日志已保存到 $PWD/drosera.log"
-    else
-        echo "错误：未找到 docker-compose 或 docker compose 命令，请确保 Docker Compose 已安装（运行选项1）"
-        exit 1
-    fi
-    echo "Docker Compose 服务启动完成"
+    # ...（此处及后续内容全部删除，等待你重新编写新的脚本命令）
 
     # 清理私钥变量
     unset DROSERA_PRIVATE_KEY
