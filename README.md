@@ -1,3 +1,5 @@
-# Drosera-Network
+# Drosera Network
 
-wget -O drosera.sh https://raw.githubusercontent.com/sdohuajia/Drosera-Network/refs/heads/main/drosera.sh && sed -i 's/\r$//' drosera.sh && chmod +x drosera.sh && ./drosera.sh
+```
+curl -sSL https://raw.githubusercontent.com/laodauhgc/drosera-network/refs/heads/main/drosera.sh -o /root/drosera.sh && chmod +x /root/drosera.sh && /bin/bash /root/drosera.sh
+```
