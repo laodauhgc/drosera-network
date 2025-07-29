@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 #
 # drosera.sh — Best-practice installer & operator helper for Drosera
-# Version: 1.1.0 
-
+# Version: 1.1.1 
+#
+# Changelog
+# - v1.1.1: AUTO mode now writes ETH_PRIVATE_KEY to /root/drosera-network/.env (normalized 64-hex, no 0x)
+#           to fix docker operator crash "Failed to parse private key (odd number of digits)".
+#           Also masks key preview and restarts stack cleanly.
+# - v1.1.0: Menu 1 full-auto; new flags --auto, --eth-amount, --trap-address; auto confirms.
+# - v1.0.3: Fix bloomboost confirm via piping "ofc"; force UTF-8 locale to prevent Rust stdin UTF-8 panic.
+# - v1.0.2: Robust trap address parsing & zero-address guard.
+# - v1.0.1: Flexible PK input; tries non-0x then 0x.
+# - v1.0.0: Initial refactor.
+#
 set -Eeuo pipefail
 IFS=$'\n\t'
 # Ensure UTF-8 locale for Rust CLIs reading stdin
@@ -13,7 +23,7 @@ export LANG="${LANG:-C.UTF-8}"
 #                 CONFIG                    #
 ############################################
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 SCRIPT_DATE="2025-07-30"
 
 # --- Flags / CLI options ---
@@ -66,6 +76,7 @@ parse_args() {
 ROOT_DIR="/root"
 TRAP_DIR="${ROOT_DIR}/my-drosera-trap"
 NET_DIR="${ROOT_DIR}/drosera-network"
+ENV_FILE="${NET_DIR}/.env"
 LOG_DIR="/var/log/drosera"
 mkdir -p "${LOG_DIR}"
 
@@ -116,6 +127,15 @@ trim_hex_key() {
   x="${x//[[:space:]]/}"  # strip spaces/tabs
   x="${x#0x}"             # drop 0x if present
   echo -n "$x"
+}
+
+mask_pk() {
+  local x="$1"; local n=${#x}
+  if (( n >= 12 )); then
+    echo "${x:0:6}******${x:n-6:6}"
+  else
+    echo "******"
+  fi
 }
 
 prompt_private_key() {
@@ -327,7 +347,6 @@ safe_edit_drosera_toml_whitelist() {
   fi
 
   if [[ $AUTO_MODE -ne 1 ]]; then
-    # Allow override interactively
     read -r -p "Enter ETH amount for bloomboost (default ${eth_amount}): " _in || true
     eth_amount="${_in:-$eth_amount}"
   fi
@@ -339,8 +358,10 @@ safe_edit_drosera_toml_whitelist() {
   echo "Bloom Boosting trap..."
   echo "trap_config: ${trap_address}"
   echo "eth_amount: ${eth_amount}"
-  # Auto confirm with "ofc"
   ( DROSERA_PRIVATE_KEY="$pk" bash -c 'echo "ofc" | drosera bloomboost --trap-address "'"$trap_address"'" --eth-amount "'"$eth_amount"'"' ) 2>&1 | tee -a "${LOG_DIR}/bloomboost.log"
+
+  # Export PK for next steps in this shell
+  export DROSERA_PK_CACHE="$pk"
 }
 
 setup_operator_stack() {
@@ -357,20 +378,47 @@ setup_operator_stack() {
   if [[ -f ".env.example" && ! -f ".env" ]]; then
     cp .env.example .env; chmod 600 .env; echo ".env created from example."
   fi
+
   # Fill VPS_IP if empty
-  if ! grep -q '^VPS_IP=' .env || [[ -z "$(grep -E '^VPS_IP=' .env | cut -d= -f2-)" ]]; then
+  if ! grep -q '^VPS_IP=' "${ENV_FILE}" || [[ -z "$(grep -E '^VPS_IP=' "${ENV_FILE}" | cut -d= -f2-)" ]]; then
     local vps_ip; vps_ip="$(curl -fsS ifconfig.me || curl -fsS ipinfo.io/ip || true)"
-    [[ -n "${vps_ip:-}" ]] && sed -i "s|^VPS_IP=.*|VPS_IP=\"${vps_ip}\"|" .env || true
+    [[ -n "${vps_ip:-}" ]] && sed -i "s|^VPS_IP=.*|VPS_IP=${vps_ip}|" "${ENV_FILE}" || true
   fi
+
+  # Write ETH_PRIVATE_KEY in AUTO (and when a key is available)
+  local pk="${DROSERA_PK_CACHE:-}"
+  if [[ -z "$pk" ]]; then pk="$(obtain_pk || true)"; fi
+  if [[ -n "$pk" ]]; then
+    local norm="$(trim_hex_key "$pk")"
+    if [[ "$norm" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      if grep -q '^ETH_PRIVATE_KEY=' "${ENV_FILE}"; then
+        sed -i "s|^ETH_PRIVATE_KEY=.*|ETH_PRIVATE_KEY=${norm}|" "${ENV_FILE}"
+      else
+        echo "ETH_PRIVATE_KEY=${norm}" >> "${ENV_FILE}"
+      fi
+      echo "Wrote ETH_PRIVATE_KEY=$(mask_pk "$norm") to ${ENV_FILE}"
+    else
+      echo "WARNING: Normalized PK is invalid; NOT writing ETH_PRIVATE_KEY to ${ENV_FILE}."
+    fi
+  else
+    echo "WARNING: No PK available to write ETH_PRIVATE_KEY to ${ENV_FILE}."
+  fi
+
   [[ -f docker-compose.yaml ]] || { echo "ERROR: docker-compose.yaml not found in ${NET_DIR}" >&2; exit 1; }
   dc -f docker-compose.yaml config >/dev/null
   log "Pulling latest operator image..."; docker pull ghcr.io/drosera-network/drosera-operator:latest 2>&1 | tee_log "docker_pull.log"
-  log "Starting operator stack..."; dc -f docker-compose.yaml up -d 2>&1 | tee_log "compose_up.log"; dc -f docker-compose.yaml ps
+
+  # Restart stack cleanly (avoid backoff loops holding bad env)
+  log "Restarting operator stack..."
+  dc -f docker-compose.yaml down -v 2>&1 | tee_log "compose_down.log" || true
+  dc -f docker-compose.yaml up -d 2>&1 | tee_log "compose_up.log"
+  dc -f docker-compose.yaml ps
 }
 
 register_and_optin_operator() {
   local pk addr trap_address
-  pk="$(obtain_pk)" || exit 1
+  pk="${DROSERA_PK_CACHE:-}"
+  if [[ -z "$pk" ]]; then pk="$(obtain_pk)" || exit 1; fi
   addr="$(get_evm_address_from_pk "$pk")" || exit 1
   echo "Using EVM address: ${addr}"
   log "Registering Drosera Operator..."
@@ -381,7 +429,7 @@ register_and_optin_operator() {
     --eth-private-key "${pk}" \
     2>&1 | tee -a "${LOG_DIR}/operator_register.log" || echo "WARNING: Register command failed; check logs."
 
-  # trap address: flag > logs > prompt (if not auto)
+  # trap address: flag > logs > (prompt if not auto)
   trap_address="${FLAGS_TRAP_ADDRESS:-}"
   if [[ -z "$trap_address" ]]; then trap_address="$(extract_trap_address_from_apply_log || true)"; fi
 
