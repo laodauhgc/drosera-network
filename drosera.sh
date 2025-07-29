@@ -1,309 +1,198 @@
 #!/usr/bin/env bash
-# drosera.sh - Setup & operate drosera-operator stack
-# Version: v1.1.9
-#
-# Changes (v1.1.9):
-# - Force IPv4-first for EXTERNAL_P2P_MADDR (fallback IPv6 if requested or no IPv4)
-# - Fix restart loop due to wrong multiaddr (/ip4 with IPv6 string)
-# - Cleanly remove old container/volume before compose up
-# - Pass DROSERA_PRIVATE_KEY/ETH_PRIVATE_KEY to `drosera apply` to avoid key-missing
-# - Wait for container stability before `register`; retry with backoff
-# - Write .env only (preserve docker-compose.yaml), create if missing
-# - Robust IP discovery & optional --ip override / --prefer-ipv6
-# - Log outputs to /var/log/drosera
+# drosera.sh - v1.2.1
+# - Sửa lỗi EXTERNAL_P2P_MADDR sai giao thức → luôn UDP/QUIC v1
+# - Ưu tiên IPv4 khi lấy public IP (fallback IPv6 hoặc --prefer-ipv6)
+# - Reset stack an toàn, xoá container/volume cũ nếu tồn tại
+# - Ghi ETH_PRIVATE_KEY, DROSERA_PRIVATE_KEY, VPS_IP, EXTERNAL_P2P_MADDR
+# - Không phụ thuộc việc source ~/.bashrc (tránh "PS1: unbound variable")
+# - Chịu lỗi thiếu Drosera CLI (skip apply) nhưng vẫn khởi chạy operator
 
 set -Eeuo pipefail
 
-# ----------------------------- Config ---------------------------------
-APP_DIR="/root/my-drosera-trap"
-STACK_DIR="/root/drosera-network"
-ENV_FILE="${STACK_DIR}/.env"
+SCRIPT_VERSION="v1.2.1"
+DEFAULT_P2P_PORT="${DEFAULT_P2P_PORT:-31313}"
+DROSERA_REPO_URL="${DROSERA_REPO_URL:-https://github.com/laodauhgc/drosera-network}"
+ROOT_DIR="${ROOT_DIR:-/root}"
+BASE_DIR="${BASE_DIR:-$ROOT_DIR/drosera-network}"
+ENV_FILE="$BASE_DIR/.env"
 LOG_DIR="/var/log/drosera"
-APPLY_LOG="${LOG_DIR}/apply.log"
-REGISTER_LOG="${LOG_DIR}/register.log"
-GENERAL_LOG="${LOG_DIR}/install.log"
+APPLY_LOG="$LOG_DIR/apply.log"
+REGISTER_LOG="$LOG_DIR/register.log"
+PREFER_IPV6="${PREFER_IPV6:-0}"
+NO_REGISTER="${NO_REGISTER:-0}"
+CUSTOM_MADDR="${CUSTOM_MADDR:-}"
+CUSTOM_PORT="${CUSTOM_PORT:-$DEFAULT_P2P_PORT}"
 
-OPERATOR_SVC_NAME="drosera-operator"
-DEFAULT_OPERATOR_IMAGE="ghcr.io/drosera-network/drosera-operator:latest"
-DEFAULT_P2P_PORT="31313"
-
-# ----------------------------- Utils ----------------------------------
-ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
-log() { echo "$(ts)  $*" | tee -a "$GENERAL_LOG" >&2; }
-info() { log "$@"; }
-warn() { echo "$(ts)  WARNING: $*" | tee -a "$GENERAL_LOG" >&2; }
-err() { echo "$(ts)  ERROR: $*" | tee -a "$GENERAL_LOG" >&2; }
-
-on_error() {
-  err "Script failed at line ${1:-unknown}. Check logs in ${LOG_DIR}."
-}
-trap 'on_error ${LINENO}' ERR
-
-cmd_exists() { command -v "$1" >/dev/null 2>&1; }
-
-mask_key() {
-  local v="$1"
-  # mask middle chars
-  if [[ "${#v}" -ge 14 ]]; then
-    echo "${v:0:6}******${v: -6}"
-  else
-    echo "******"
-  fi
-}
-
-retry() {
-  # retry <max> <sleep_seconds> <command...>
-  local max="$1"; shift
-  local slp="$1"; shift
-  local n=1
-  until "$@"; do
-    if (( n >= max )); then return 1; fi
-    warn "Attempt $n/$max failed. Retry in ${slp}s: $*"
-    sleep "$slp"
-    ((n++))
-  done
-}
-
-ensure_dirs() {
-  mkdir -p "$LOG_DIR"
-  touch "$GENERAL_LOG" "$APPLY_LOG" "$REGISTER_LOG"
-}
+# ---------- utils ----------
+timestamp() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+_log() { echo "$(timestamp)  $*"; }
+info() { _log "$@"; }
+warn() { _log "WARNING: $*"; }
+err () { _log "ERROR: $*"; }
+die () { err "$*"; exit 1; }
 
 require_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    err "Please run as root."
-    exit 1
+  if [[ "$(id -u)" -ne 0 ]]; then
+    die "Vui lòng chạy bằng user root."
   fi
 }
 
-# ----------------------------- IP helpers ------------------------------
-get_ipv4() {
-  # Try public IPv4 via curl -4; fallback to iproute/hostname
-  local ip=""
-  ip=$(curl -4 -sS --max-time 3 https://api.ipify.org || true)
-  if [[ -z "${ip}" ]]; then
-    ip=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -vE '^(127\.|10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.)' | head -n1 || true)
-  fi
-  if [[ -z "${ip}" ]]; then
-    ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
-  fi
-  echo "$ip"
+mask_pk() {
+  local pk="$1"
+  if [[ -z "$pk" ]]; then echo ""; return; fi
+  if [[ "${#pk}" -le 10 ]]; then echo "$pk"; return; fi
+  echo "${pk:0:6}******${pk: -6}"
 }
 
-get_ipv6() {
-  local ip=""
-  ip=$(curl -6 -sS --max-time 3 https://api64.ipify.org || true)
-  if [[ -z "${ip}" ]]; then
-    ip=$(ip -6 addr show scope global | awk '/inet6/{print $2}' | cut -d/ -f1 | head -n1 || true)
+# ---------- deps ----------
+apt_install_base() {
+  info "Updating apt & installing base packages..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl wget gnupg lsb-release git jq unzip \
+    iproute2 dnsutils netcat-openbsd ufw iptables \
+    apt-transport-https software-properties-common >/dev/null
+}
+
+ensure_docker() {
+  info "Docker already installed. Upgrading if needed..."
+  if ! command -v docker >/dev/null 2>&1; then
+    apt-get install -y docker.io docker-compose-plugin >/dev/null
+  else
+    apt-get install -y docker-compose-plugin >/dev/null || true
   fi
-  echo "$ip"
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker  >/dev/null 2>&1 || true
+}
+
+ensure_bun() {
+  if command -v bun >/dev/null 2>&1; then
+    info "Bun already installed."
+    return
+  fi
+  info "Installing Bun..."
+  export BUN_INSTALL="$HOME/.bun"
+  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+  export PATH="$BUN_INSTALL/bin:$PATH"
+  command -v bun >/dev/null 2>&1 || warn "Bun install may have failed; continuing."
+}
+
+ensure_foundry() {
+  if command -v forge >/dev/null 2>&1; then
+    info "Foundry already installed; running foundryup..."
+    # Không source ~/.bashrc để tránh 'PS1: unbound variable'
+    if [[ -x "$HOME/.foundry/bin/foundryup" ]]; then
+      "$HOME/.foundry/bin/foundryup" >/dev/null 2>&1 || true
+    else
+      warn "foundryup not found; skipping update."
+    fi
+    return
+  fi
+  info "Installing Foundry..."
+  curl -L https://foundry.paradigm.xyz | bash >/dev/null 2>&1 || true
+  if [[ -x "$HOME/.foundry/bin/foundryup" ]]; then
+    "$HOME/.foundry/bin/foundryup" >/dev/null 2>&1 || true
+    export PATH="$HOME/.foundry/bin:$PATH"
+  else
+    warn "Foundry install may have failed; continuing."
+  fi
+}
+
+check_drosera_cli() {
+  if command -v drosera >/dev/null 2>&1; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# ---------- IP & multiaddr ----------
+trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+
+get_public_ipv4() {
+  local ip=""
+  ip="$(curl -4 -fsS https://api.ipify.org || true)"
+  if [[ -z "$ip" ]]; then ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com || true)"; fi
+  if [[ -z "$ip" ]]; then ip="$(curl -4 -fsS https://ifconfig.co || true)"; fi
+  echo "$ip" | trim
+}
+
+get_public_ipv6() {
+  local ip=""
+  ip="$(curl -6 -fsS https://api64.ipify.org || true)"
+  if [[ -z "$ip" ]]; then ip="$(dig +short -6 myip.opendns.com @resolver1.opendns.com || true)"; fi
+  if [[ -z "$ip" ]]; then ip="$(curl -6 -fsS https://ifconfig.co || true)"; fi
+  echo "$ip" | trim
 }
 
 build_multiaddr() {
-  local ip="$1"
-  local port="${2:-$DEFAULT_P2P_PORT}"
+  local ip="$1"; local port="${2:-$DEFAULT_P2P_PORT}"
   if [[ "$ip" == *:* ]]; then
     # IPv6
+    echo "/ip6/${ip}/udp/${port}/quic-v1"
+  else
+    # IPv4
+    echo "/ip4/${ip}/udp/${port}/quic-v1"
+  fi
+}
+
+build_tcp_multiaddr() {
+  local ip="$1"; local port="${2:-$DEFAULT_P2P_PORT}"
+  if [[ "$ip" == *:* ]]; then
     echo "/ip6/${ip}/tcp/${port}"
   else
     echo "/ip4/${ip}/tcp/${port}"
   fi
 }
 
-# ----------------------------- Installers ------------------------------
-apt_prepare() {
-  info "Updating apt & installing base packages..."
-  DEBIAN_FRONTEND=noninteractive apt-get update -y >>"$GENERAL_LOG" 2>&1
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    curl ca-certificates jq git unzip lsb-release net-tools iproute2 \
-    >>"$GENERAL_LOG" 2>&1
-}
-
-ensure_docker() {
-  if ! cmd_exists docker; then
-    info "Installing Docker..."
-    curl -fsSL https://get.docker.com | sh >>"$GENERAL_LOG" 2>&1
-    systemctl enable --now docker >>"$GENERAL_LOG" 2>&1 || true
+pick_public_ip() {
+  local ip4 ip6
+  if [[ "$PREFER_IPV6" == "1" ]]; then
+    ip6="$(get_public_ipv6)"
+    if [[ -n "$ip6" ]]; then echo "$ip6"; return; fi
+    ip4="$(get_public_ipv4)"
+    echo "$ip4"; return
   else
-    info "Docker already installed. Upgrading if needed..."
-    systemctl enable docker >/dev/null 2>&1 || true
+    ip4="$(get_public_ipv4)"
+    if [[ -n "$ip4" ]]; then echo "$ip4"; return; fi
+    ip6="$(get_public_ipv6)"
+    echo "$ip6"; return
   fi
 }
 
-ensure_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    export COMPOSE="docker compose"
-  elif cmd_exists docker-compose; then
-    export COMPOSE="docker-compose"
+# ---------- repo sync ----------
+ensure_repo() {
+  if [[ -d "$BASE_DIR/.git" ]]; then
+    info "Syncing drosera-network at $BASE_DIR ..."
+    (cd "$BASE_DIR" && git fetch --depth=1 origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1) || true
   else
-    info "Installing docker compose plugin..."
-    # most systems will have it with docker package, try again
-    if docker compose version >/dev/null 2>&1; then
-      export COMPOSE="docker compose"
-    else
-      err "Docker compose not found. Please install docker compose plugin."
-      exit 1
-    fi
+    info "Cloning drosera-network into $BASE_DIR ..."
+    rm -rf "$BASE_DIR" 2>/dev/null || true
+    git clone --depth=1 "$DROSERA_REPO_URL" "$BASE_DIR" >/dev/null 2>&1 || mkdir -p "$BASE_DIR"
   fi
 }
 
-ensure_bun() {
-  if ! cmd_exists bun; then
-    info "Installing Bun..."
-    curl -fsSL https://bun.sh/install | bash >>"$GENERAL_LOG" 2>&1 || true
-    export BUN_INSTALL="${HOME}/.bun"
-    export PATH="${BUN_INSTALL}/bin:${PATH}"
-  else
-    info "Bun already installed."
-  fi
-}
-
-ensure_foundry() {
-  if [[ ! -x "${HOME}/.foundry/bin/forge" ]]; then
-    info "Installing Foundry..."
-    # Foundry adds lines to .bashrc; we don't source it to avoid PS1 errors.
-    curl -fsSL https://foundry.paradigm.xyz | bash >>"$GENERAL_LOG" 2>&1
-  else
-    info "Foundry already installed; running foundryup..."
-  fi
-  "${HOME}/.foundry/bin/foundryup" >>"$GENERAL_LOG" 2>&1 || true
-}
-
-ensure_drosera_cli() {
-  if cmd_exists drosera; then
-    info "Drosera CLI present."
-  else
-    warn "Drosera CLI not found in PATH. If you have a local CLI, ensure it's installed."
-    # You may add your own install steps here if needed.
-  fi
-}
-
-# ----------------------------- Compose Ops -----------------------------
-compose_reset_stack() {
-  info "Resetting operator stack (container & volume)..."
-  mkdir -p "$STACK_DIR"
-  cd "$STACK_DIR"
-
-  # Best-effort down
-  $COMPOSE down --remove-orphans -v >>"$GENERAL_LOG" 2>&1 || true
-
-  # Remove named volume if still around
-  docker volume rm "${OPERATOR_SVC_NAME%:*}_drosera_data" >/dev/null 2>&1 || true
-  docker volume rm "drosera-network_drosera_data" >/dev/null 2>&1 || true
-}
-
-compose_pull_and_up() {
-  info "Pulling latest operator image..."
-  cd "$STACK_DIR"
-  # If image is pinned in docker-compose.yaml, compose pull will respect that
-  $COMPOSE pull >>"$GENERAL_LOG" 2>&1 || docker pull "$DEFAULT_OPERATOR_IMAGE" >>"$GENERAL_LOG" 2>&1 || true
-
-  info "Starting operator stack..."
-  $COMPOSE up -d >>"$GENERAL_LOG" 2>&1
-}
-
-wait_container_stable() {
-  local name="$1"
-  local timeout="${2:-120}"
-  local start_ts
-  start_ts=$(date +%s)
-
-  info "Waiting up to ${timeout}s for container '${name}' to stabilize..."
-  while true; do
-    local now status restarts
-    now=$(date +%s)
-    if (( now - start_ts > timeout )); then
-      warn "Container not stable after ${timeout}s."
-      return 1
-    fi
-
-    if ! docker ps --format '{{.Names}} {{.Status}}' | grep -q "^${name} "; then
-      sleep 2
-      continue
-    fi
-
-    status=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
-    restarts=$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo "0")
-
-    if [[ "$status" == "running" ]]; then
-      # wait a short stability window
-      local r0="$restarts"
-      sleep 5
-      local r1
-      r1=$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo "0")
-      if [[ "$r0" == "$r1" ]]; then
-        info "Container '${name}' is running and stable."
-        return 0
-      fi
-    fi
-    sleep 3
-  done
-}
-
-# ----------------------------- Drosera Ops -----------------------------
-trap_project_sync() {
-  info "Initializing trap project at ${APP_DIR} ..."
-  mkdir -p "$APP_DIR"
-
-  if [[ -d "${APP_DIR}/.git" ]]; then
-    info "Found existing repo in ${APP_DIR}; syncing deps..."
-    (cd "$APP_DIR" && git reset --hard >/dev/null 2>&1 || true && git pull --rebase --autostash >/dev/null 2>&1 || true)
-  else
-    # If you need to clone a template repo, add commands here.
-    info "Using existing directory ${APP_DIR} (no git)."
-  fi
-
-  # bun install if package.json exists
-  if [[ -f "${APP_DIR}/package.json" ]]; then
-    (cd "$APP_DIR" && bun install) >>"$GENERAL_LOG" 2>&1 || true
-  fi
-}
-
-drosera_apply_noninteractive() {
-  local pk_hex="$1" # without 0x
-  local pk0x="0x${pk_hex#0x}"
-
-  info "Running: drosera apply (non-interactive)"
-  (
-    cd "$APP_DIR"
-    # Some CLIs read ETH_PRIVATE_KEY, some read DROSERA_PRIVATE_KEY; export both.
-    DROSERA_PRIVATE_KEY="${pk0x}" \
-    ETH_PRIVATE_KEY="${pk0x}" \
-    yes ofc | drosera apply
-  ) | tee "$APPLY_LOG"
-}
-
-parse_apply_output() {
-  # Extract trap_config/trap_rewards if present in output
-  local tc tr
-  tc=$(grep -Eo 'trap_config:\s*0x[a-fA-F0-9]{40,}' "$APPLY_LOG" | awk '{print $2}' | tail -n1 || true)
-  tr=$(grep -Eo 'trap_rewards:\s*0x[a-fA-F0-9]{40,}' "$APPLY_LOG" | awk '{print $2}' | tail -n1 || true)
-
-  if [[ -n "$tc" ]]; then echo "$tc|$tr"; else echo "|"; fi
-}
-
-operator_register() {
-  info "Registering Drosera Operator..."
-  # run inside container
-  (docker exec "$OPERATOR_SVC_NAME" /drosera-operator register) | tee "$REGISTER_LOG"
-}
-
-# ----------------------------- .env Writer -----------------------------
+# ---------- .env writer ----------
 write_env() {
-  local pk_hex="$1"  # without 0x
-  local ip="$2"      # chosen IP (v4 or v6)
-  local pk0x="0x${pk_hex#0x}"
-  local maddr
-  maddr=$(build_multiaddr "$ip" "$DEFAULT_P2P_PORT")
+  local pk="$1"; local ip="$2"; local port="${3:-$DEFAULT_P2P_PORT}"; local maddr="$4"
+  local tcp_maddr
+  mkdir -p "$(dirname "$ENV_FILE")"
 
-  mkdir -p "$STACK_DIR"
-  touch "$ENV_FILE"
+  # chuẩn hoá private key
+  if [[ -n "$pk" && "$pk" != 0x* ]]; then pk="0x$pk"; fi
 
-  # Write/replace keys
   if grep -q '^ETH_PRIVATE_KEY=' "$ENV_FILE" 2>/dev/null; then
-    sed -i "s#^ETH_PRIVATE_KEY=.*#ETH_PRIVATE_KEY=${pk0x}#g" "$ENV_FILE"
+    sed -i "s#^ETH_PRIVATE_KEY=.*#ETH_PRIVATE_KEY=${pk}#g" "$ENV_FILE"
   else
-    echo "ETH_PRIVATE_KEY=${pk0x}" >> "$ENV_FILE"
+    echo "ETH_PRIVATE_KEY=${pk}" >> "$ENV_FILE"
+  fi
+  info "Wrote ETH_PRIVATE_KEY=$(mask_pk "$pk") to $ENV_FILE"
+
+  if grep -q '^DROSERA_PRIVATE_KEY=' "$ENV_FILE" 2>/dev/null; then
+    sed -i "s#^DROSERA_PRIVATE_KEY=.*#DROSERA_PRIVATE_KEY=${pk}#g" "$ENV_FILE"
+  else
+    echo "DROSERA_PRIVATE_KEY=${pk}" >> "$ENV_FILE"
   fi
 
   if grep -q '^VPS_IP=' "$ENV_FILE" 2>/dev/null; then
@@ -311,152 +200,230 @@ write_env() {
   else
     echo "VPS_IP=${ip}" >> "$ENV_FILE"
   fi
+  info "Wrote VPS_IP=${ip} to $ENV_FILE"
 
   if grep -q '^EXTERNAL_P2P_MADDR=' "$ENV_FILE" 2>/dev/null; then
     sed -i "s#^EXTERNAL_P2P_MADDR=.*#EXTERNAL_P2P_MADDR=${maddr}#g" "$ENV_FILE"
   else
     echo "EXTERNAL_P2P_MADDR=${maddr}" >> "$ENV_FILE"
   fi
+  info "Wrote EXTERNAL_P2P_MADDR=${maddr} to $ENV_FILE"
 
-  info "Wrote ETH_PRIVATE_KEY=$(mask_key "$pk0x") to ${ENV_FILE}"
-  info "Wrote VPS_IP=${ip} to ${ENV_FILE}"
-  info "Wrote EXTERNAL_P2P_MADDR=${maddr} to ${ENV_FILE}"
+  # Tuỳ chọn: ghi thêm TCP maddr (một số tool nội bộ có thể cần)
+  tcp_maddr="$(build_tcp_multiaddr "$ip" "$port")"
+  if grep -q '^EXTERNAL_P2P_TCP_MADDR=' "$ENV_FILE" 2>/dev/null; then
+    sed -i "s#^EXTERNAL_P2P_TCP_MADDR=.*#EXTERNAL_P2P_TCP_MADDR=${tcp_maddr}#g" "$ENV_FILE"
+  else
+    echo "EXTERNAL_P2P_TCP_MADDR=${tcp_maddr}" >> "$ENV_FILE"
+  fi
+  info "Wrote EXTERNAL_P2P_TCP_MADDR=${tcp_maddr} to $ENV_FILE"
 }
 
-# ----------------------------- Args ------------------------------------
-AUTO=0
-PREF_IPV6=0
-FORCED_IP=""
-PRIVATE_KEY_HEX=""
-OP_DO_REGISTER=1
+# ---------- trap project (best-effort) ----------
+ensure_trap_project() {
+  local trap_dir="$ROOT_DIR/my-drosera-trap"
+  info "Initializing trap project at $trap_dir ..."
+  if [[ -d "$trap_dir/.git" ]]; then
+    info "Found existing repo in $trap_dir; syncing deps..."
+  else
+    mkdir -p "$trap_dir"
+    (cd "$trap_dir" && git init >/dev/null 2>&1) || true
+  fi
+
+  # try bun install (best-effort)
+  if command -v bun >/dev/null 2>&1; then
+    (cd "$trap_dir" && bun install >/dev/null 2>&1) || true
+  fi
+}
+
+maybe_drosera_apply() {
+  mkdir -p "$LOG_DIR"
+  : > "$APPLY_LOG"
+  if [[ "$(check_drosera_cli)" == "1" ]]; then
+    info "Running: drosera apply (non-interactive)"
+    # Truyền private key vào env cho CLI
+    (DROSERA_PRIVATE_KEY="${ETH_PK:-}" drosera apply -y) >>"$APPLY_LOG" 2>&1 || {
+      warn "Apply failed. See $APPLY_LOG"
+      return 0
+    }
+  else
+    warn "Drosera CLI not found in PATH. If you have a local CLI, ensure it's installed."
+    warn "Drosera CLI missing; skipped 'drosera apply'."
+  fi
+}
+
+# ---------- docker stack ----------
+compose_down_safe() {
+  (cd "$BASE_DIR" && docker compose down -v --remove-orphans >/dev/null 2>&1) || true
+}
+
+remove_old_container_volume() {
+  docker rm -f drosera-operator >/dev/null 2>&1 || true
+  docker volume rm "${PWD##*/}_drosera_data" >/dev/null 2>&1 || true
+  docker volume rm "drosera-network_drosera_data" >/dev/null 2>&1 || true
+}
+
+pull_operator_image() {
+  info "Pulling latest operator image..."
+  docker pull ghcr.io/drosera-network/drosera-operator:v1.20.0 >/dev/null 2>&1 || true
+}
+
+start_stack() {
+  info "Starting operator stack..."
+  (cd "$BASE_DIR" && docker compose up -d >/dev/null 2>&1) || die "Cannot start docker compose."
+}
+
+wait_container_stable() {
+  local name="drosera-operator" timeout=120 elapsed=0
+  info "Waiting up to ${timeout}s for container '${name}' to stabilize..."
+  while (( elapsed < timeout )); do
+    local state
+    state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")"
+    if [[ "$state" == "running" ]]; then
+      # nhanh kiểm tra lỗi invalid protocol string trong log gần đây
+      if docker logs --since 5s "$name" 2>&1 | grep -qi "invalid protocol string"; then
+        warn "Detected 'invalid protocol string' in logs; container may restart."
+      else
+        return 0
+      fi
+    fi
+    sleep 2; elapsed=$((elapsed+2))
+  done
+  return 1
+}
+
+register_operator() {
+  local name="drosera-operator"
+  mkdir -p "$LOG_DIR"
+  : > "$REGISTER_LOG"
+
+  if [[ "$NO_REGISTER" == "1" ]]; then
+    info "NO_REGISTER=1 → skipping operator register."
+    return 0
+  fi
+
+  if [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo)" != "running" ]]; then
+    warn "Container not running; skip register. Check logs."
+    return 0
+  fi
+
+  info "Registering Drosera Operator..."
+  local tries=(10 20 40 80)
+  for d in "${tries[@]}"; do
+    if docker exec "$name" /drosera-operator register >>"$REGISTER_LOG" 2>&1; then
+      info "Register successful."
+      return 0
+    else
+      warn "Register attempt failed; retrying in ${d}s..."
+      sleep "$d"
+      if [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo)" != "running" ]]; then
+        warn "Container not running; aborting register retries."
+        break
+      fi
+    fi
+  done
+  warn "Register command failed; see $REGISTER_LOG"
+  return 0
+}
+
+open_ports() {
+  # best-effort mở port UDP 31313
+  ufw allow "${CUSTOM_PORT}/udp" >/dev/null 2>&1 || true
+  iptables -I INPUT -p udp --dport "${CUSTOM_PORT}" -j ACCEPT >/dev/null 2>&1 || true
+}
+
+# ---------- argument parsing ----------
+ETH_PK=""
+AUTO="0"
 
 usage() {
-  cat <<'USAGE'
-Usage:
-  drosera.sh --auto --pk <PRIVATE_KEY_64_HEX> [--ip <IP>] [--prefer-ipv6] [--no-register]
+  cat <<EOF
+Usage: $0 [--auto] --pk <hex|0xhex> [--prefer-ipv6] [--maddr <multiaddr>] [--port <31313>]
+       [--no-register]
 
 Options:
-  --auto            Chạy toàn bộ quy trình (cài deps, sync, apply, compose up, register)
-  --pk KEY          Private key 64 hex (không kèm 0x). Ví dụ: 0b68ef...97fc
-  --ip IP           Ép dùng IP này cho EXTERNAL_P2P_MADDR (ví dụ 152.53.82.237 hoặc 2a0a:....)
-  --prefer-ipv6     Ưu tiên IPv6 nếu có; nếu không có sẽ fallback IPv4
-  --no-register     KHÔNG chạy bước register bên trong container
-  -h, --help        Hiển thị trợ giúp
-
-Ví dụ:
-  /bin/bash drosera.sh --auto --pk YOUR_PRIVATE_KEY_NO_0x
-  /bin/bash drosera.sh --auto --pk YOUR_PRIVATE_KEY_NO_0x --ip 152.53.82.237
-  /bin/bash drosera.sh --auto --pk YOUR_PRIVATE_KEY_NO_0x --prefer-ipv6
-USAGE
+  --auto            Chạy không hỏi (non-interactive).
+  --pk <key>        Private key EVM (64 hex), có thể kèm '0x' hoặc không.
+  --prefer-ipv6     Ưu tiên IPv6 (mặc định ưu tiên IPv4).
+  --maddr <maddr>   Ghi đè EXTERNAL_P2P_MADDR (vd: /ip4/1.2.3.4/udp/31313/quic-v1).
+  --port <p>        P2P port (mặc định 31313).
+  --no-register     Không chạy bước register trong container.
+  -h|--help         Hiển thị trợ giúp.
+EOF
 }
 
-while (( "$#" )); do
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --auto) AUTO=1; shift ;;
-    --pk) PRIVATE_KEY_HEX="${2:-}"; shift 2 ;;
-    --ip) FORCED_IP="${2:-}"; shift 2 ;;
-    --prefer-ipv6) PREF_IPV6=1; shift ;;
-    --no-register) OP_DO_REGISTER=0; shift ;;
+    --auto) AUTO="1"; shift ;;
+    --pk) ETH_PK="${2:-}"; shift 2 ;;
+    --prefer-ipv6) PREFER_IPV6="1"; shift ;;
+    --maddr) CUSTOM_MADDR="${2:-}"; shift 2 ;;
+    --port) CUSTOM_PORT="${2:-$DEFAULT_P2P_PORT}"; shift 2 ;;
+    --no-register) NO_REGISTER="1"; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) err "Unknown option: $1"; usage; exit 1 ;;
+    *) die "Unknown arg: $1. Use --help for usage." ;;
   esac
 done
 
-# ----------------------------- Main ------------------------------------
 main() {
   require_root
-  ensure_dirs
+  mkdir -p "$LOG_DIR"
 
-  if [[ "$AUTO" -ne 1 ]]; then
-    usage
-    exit 0
+  if [[ "$AUTO" != "1" && -z "$ETH_PK" ]]; then
+    warn "Bạn chưa cung cấp --pk. Chạy với --auto --pk <hex> để tự động."
+  fi
+  if [[ -z "$ETH_PK" ]]; then
+    die "Thiếu --pk. Ví dụ: --pk 0b68ef...ef97fc"
   fi
 
-  if [[ -z "${PRIVATE_KEY_HEX}" ]]; then
-    err "Missing --pk <PRIVATE_KEY_64_HEX>."
-    exit 1
-  fi
+  info "Using Private Key: $(mask_pk "$ETH_PK")"
 
-  info "Using Private Key: $(mask_key "${PRIVATE_KEY_HEX}")"
-  apt_prepare
+  apt_install_base
   ensure_docker
-  ensure_compose
   ensure_bun
   ensure_foundry
-  ensure_drosera_cli
 
-  # Detect IP
-  local chosen_ip=""
-  if [[ -n "$FORCED_IP" ]]; then
-    chosen_ip="$FORCED_IP"
-    info "Using forced IP: ${chosen_ip}"
+  # Lấy public IP (ưu tiên IPv4)
+  local pub_ip
+  pub_ip="$(pick_public_ip)"
+  if [[ -z "$pub_ip" ]]; then
+    die "Không xác định được Public IP (IPv4/IPv6). Hãy thử lại hoặc cung cấp --maddr."
+  fi
+  info "Using Public IP: ${pub_ip}"
+
+  ensure_repo
+
+  # Xây multiaddr (UDP/QUIC v1) hoặc dùng override
+  local maddr
+  if [[ -n "$CUSTOM_MADDR" ]]; then
+    maddr="$CUSTOM_MADDR"
   else
-    local ip4 ip6
-    ip4=$(get_ipv4)
-    ip6=$(get_ipv6)
-
-    if [[ "$PREF_IPV6" -eq 1 ]]; then
-      if [[ -n "$ip6" ]]; then chosen_ip="$ip6"; else chosen_ip="$ip4"; fi
-    else
-      if [[ -n "$ip4" ]]; then chosen_ip="$ip4"; else chosen_ip="$ip6"; fi
-    fi
-    if [[ -z "$chosen_ip" ]]; then
-      err "Unable to detect public IP (IPv4 or IPv6). Use --ip to specify."
-      exit 1
-    fi
+    maddr="$(build_multiaddr "$pub_ip" "$CUSTOM_PORT")"
   fi
 
-  info "Using Public IP: ${chosen_ip}"
+  # Ghi .env
+  write_env "$ETH_PK" "$pub_ip" "$CUSTOM_PORT" "$maddr"
 
-  # Prepare stack env
-  write_env "${PRIVATE_KEY_HEX}" "${chosen_ip}"
+  # Trap project (best-effort)
+  ensure_trap_project
 
-  # Sync trap project & apply (best-effort)
-  trap_project_sync
-  if cmd_exists drosera; then
-    if drosera_apply_noninteractive "${PRIVATE_KEY_HEX}"; then
-      :
-    else
-      warn "Apply failed. See ${APPLY_LOG}"
-    fi
-  else
-    warn "Drosera CLI missing; skipped 'drosera apply'."
+  # drosera apply (nếu có CLI)
+  ETH_PK="$ETH_PK" maybe_drosera_apply
+
+  # Reset & khởi chạy stack
+  info "Resetting operator stack (container & volume)..."
+  (cd "$BASE_DIR" && compose_down_safe)
+  remove_old_container_volume
+  pull_operator_image
+  start_stack
+
+  if ! wait_container_stable; then
+    warn "Container not stable after 120s."
+    warn "Operator not stable; you may check logs: docker logs -f drosera-operator"
   fi
 
-  # Bring up the operator stack
-  compose_reset_stack
-  compose_pull_and_up
-
-  if ! wait_container_stable "$OPERATOR_SVC_NAME" 120; then
-    warn "Operator not stable; you may check logs: docker logs -f ${OPERATOR_SVC_NAME}"
-  fi
-
-  # Register (optional)
-  if [[ "$OP_DO_REGISTER" -eq 1 ]]; then
-    # Only attempt when container is running
-    local status
-    status=$(docker inspect -f '{{.State.Status}}' "$OPERATOR_SVC_NAME" 2>/dev/null || echo "unknown")
-    if [[ "$status" != "running" ]]; then
-      warn "Container not running; skip register. Check logs."
-    else
-      # retry register up to 4 times with backoff (10, 20, 40, 80s)
-      local delays=(10 20 40 80)
-      local ok=0
-      for d in "${delays[@]}"; do
-        if operator_register; then
-          ok=1; break
-        else
-          warn "Register attempt failed; retrying in ${d}s..."
-          sleep "$d"
-        fi
-      done
-      if [[ "$ok" -ne 1 ]]; then
-        warn "Register command failed; see ${REGISTER_LOG}"
-      fi
-    fi
-  else
-    info "Skipping register as requested (--no-register)."
-  fi
+  # Đăng ký operator (nếu container running)
+  register_operator
 
   info "Done."
 }
