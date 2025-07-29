@@ -3,10 +3,10 @@ set -Eeuo pipefail
 
 # ==============================
 #  Drosera All-in-One Installer
-#  v1.2.0 (adaptive, full-path)
+#  v1.2.1 (robust apt, no early-exit, adaptive)
 # ==============================
 
-# -------- Config mặc định (có thể override bằng ENV) --------
+# -------- Config mặc định (override bằng ENV nếu cần) --------
 DROSERA_OPERATOR_IMAGE="${DROSERA_OPERATOR_IMAGE:-ghcr.io/drosera-network/drosera-operator:v1.20.0}"
 TRAP_PROJECT_DIR="${TRAP_PROJECT_DIR:-/root/my-drosera-trap}"
 NETWORK_REPO_DIR="${NETWORK_REPO_DIR:-/root/drosera-network}"
@@ -73,53 +73,78 @@ USAGE
 PK_HEX=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --pk)
-      PK_HEX="$2"; shift 2;;
-    --auto)
-      AUTO_MODE=1; SHOW_MENU=0; shift;;
-    --menu)
-      SHOW_MENU=1; AUTO_MODE=0; shift;;
-    --operator-only)
-      DO_OPERATOR_ONLY=1; DO_TRAP=0; DO_OPTIN=0; shift;;
-    --no-trap)
-      DO_TRAP=0; shift;;
-    --no-optin)
-      DO_OPTIN=0; shift;;
-    --image)
-      DROSERA_OPERATOR_IMAGE="$2"; shift 2;;
-    --help|-h)
-      usage; exit 0;;
-    *)
-      err "Unknown arg: $1. Use --help for usage."; exit 2;;
+    --pk) PK_HEX="$2"; shift 2;;
+    --auto) AUTO_MODE=1; SHOW_MENU=0; shift;;
+    --menu) SHOW_MENU=1; AUTO_MODE=0; shift;;
+    --operator-only) DO_OPERATOR_ONLY=1; DO_TRAP=0; DO_OPTIN=0; shift;;
+    --no-trap) DO_TRAP=0; shift;;
+    --no-optin) DO_OPTIN=0; shift;;
+    --image) DROSERA_OPERATOR_IMAGE="$2"; shift 2;;
+    --help|-h) usage; exit 0;;
+    *) err "Unknown arg: $1. Use --help for usage."; exit 2;;
   esac
 done
 
-# Khi chọn operator-only thì không làm trap/optin
 if [[ "$DO_OPERATOR_ONLY" == "1" ]]; then
   DO_TRAP=0; DO_OPTIN=0; DO_FULL=0
 fi
 
 require_root
 
-# -------- Helpers --------
-apt_install() {
-  DEBIAN_FRONTEND=noninteractive apt-get update -y >>"$INSTALL_LOG" 2>&1
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >>"$INSTALL_LOG" 2>&1
+# -------- APT helpers (có retry & không làm script thoát sớm) --------
+apt_retry() {
+  # $1... = full apt-get args (e.g. update) hoặc "install pkg ..."
+  local tries=12
+  local delay=5
+  local cmd=(apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" "$@")
+  # special for 'update': remove -y
+  if [[ "$1" == "update" ]]; then
+    cmd=(apt-get update)
+  fi
+  : >>"$INSTALL_LOG"
+  for i in $(seq 1 $tries); do
+    set +e
+    DEBIAN_FRONTEND=noninteractive "${cmd[@]}" >>"$INSTALL_LOG" 2>&1
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    if grep -Eqi "Could not get lock|dpkg was interrupted|front-end lock" "$INSTALL_LOG"; then
+      warn "apt đang bị khoá; thử lại trong ${delay}s... (attempt $i/$tries)"
+      sleep "$delay"
+      if (( delay < 60 )); then delay=$((delay*2)); fi
+      continue
+    fi
+    warn "apt-get $* lỗi (rc=$rc); xem $INSTALL_LOG"
+    return $rc
+  done
+  warn "apt-get $* vẫn lỗi sau $tries lần; xem $INSTALL_LOG"
+  return 1
 }
+
+apt_update() { apt_retry update || true; }
+apt_install() { apt_retry install "$@" || true; }
 
 ensure_base() {
   info "Updating apt & installing base packages..."
+  apt_update
   apt_install curl ca-certificates gnupg lsb-release jq git unzip net-tools dnsutils iproute2 coreutils
 }
 
 ensure_docker() {
-  info "Docker already installed. Upgrading if needed..."
-  if ! command -v docker >/dev/null 2>&1; then
-    apt_install docker.io
+  if command -v docker >/dev/null 2>&1; then
+    info "Docker already installed. Skipping re-install."
   else
+    info "Installing Docker..."
     apt_install docker.io
   fi
-  systemctl enable --now docker >>"$INSTALL_LOG" 2>&1 || true
+  # start docker service nếu có systemctl
+  if command -v systemctl >/dev/null 2>&1; then
+    set +e
+    systemctl enable --now docker >>"$INSTALL_LOG" 2>&1
+    set -e
+  fi
 }
 
 ensure_bun() {
@@ -128,67 +153,65 @@ ensure_bun() {
     return
   fi
   info "Installing Bun..."
-  curl -fsSL https://bun.sh/install | bash >>"$INSTALL_LOG" 2>&1 || true
-  # Thêm PATH tạm thời cho session này
+  set +e
+  curl -fsSL https://bun.sh/install | bash >>"$INSTALL_LOG" 2>&1
+  rc=$?; set -e
   export BUN_INSTALL="${BUN_INSTALL:-/root/.bun}"
   export PATH="$BUN_INSTALL/bin:$PATH"
+  if [[ $rc -ne 0 ]]; then warn "Cài Bun lỗi; tiếp tục."; fi
 }
 
 ensure_foundry() {
   if command -v forge >/dev/null 2>&1; then
     info "Foundry already installed; running foundryup..."
-    # Không source .bashrc để tránh lỗi PS1; gọi trực tiếp binary
     if [[ -x "/root/.foundry/bin/foundryup" ]]; then
-      "/root/.foundry/bin/foundryup" >>"$INSTALL_LOG" 2>&1 || true
-    else
-      curl -fsSL https://foundry.paradigm.xyz | bash >>"$INSTALL_LOG" 2>&1 || true
-      export PATH="/root/.foundry/bin:$PATH"
-      "/root/.foundry/bin/foundryup" >>"$INSTALL_LOG" 2>&1 || true
+      set +e; "/root/.foundry/bin/foundryup" >>"$INSTALL_LOG" 2>&1; set -e
     fi
   else
     info "Installing Foundry..."
-    curl -fsSL https://foundry.paradigm.xyz | bash >>"$INSTALL_LOG" 2>&1 || true
+    set +e
+    curl -fsSL https://foundry.paradigm.xyz | bash >>"$INSTALL_LOG" 2>&1
+    rc=$?
+    set -e
     export PATH="/root/.foundry/bin:$PATH"
-    "/root/.foundry/bin/foundryup" >>"$INSTALL_LOG" 2>&1 || true
+    if [[ $rc -eq 0 && -x "/root/.foundry/bin/foundryup" ]]; then
+      set +e; "/root/.foundry/bin/foundryup" >>"$INSTALL_LOG" 2>&1; set -e
+    else
+      warn "Cài Foundry lỗi; tiếp tục."
+    fi
   fi
-  # Đảm bảo PATH có foundry mà không source .bashrc
   export PATH="/root/.foundry/bin:$PATH"
 }
 
 get_public_ipv4() {
-  # Ưu tiên DNS OpenDNS, sau đó ipify, cuối cùng là routing local (không hoàn hảo nhưng có giá trị)
   local ip=""
-  ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com || true)"
-  if [[ -z "${ip}" ]]; then
-    ip="$(curl -4fsSL https://api.ipify.org || true)"
+  set +e
+  ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null)"
+  if [[ -z "$ip" ]]; then ip="$(curl -4fsSL https://api.ipify.org 2>/dev/null)"; fi
+  if [[ -z "$ip" ]]; then
+    ip="$(ip -o route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src"){print $(i+1); exit}}}')"
   fi
-  if [[ -z "${ip}" ]]; then
-    # fallback: cố lấy địa chỉ nguồn khi ping 8.8.8.8
-    ip="$(ip -o route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src"){print $(i+1); exit}}}')" || true
-  fi
-  echo -n "${ip}"
+  set -e
+  echo -n "$ip"
 }
 
 write_env_file() {
   mkdir -p "$NETWORK_REPO_DIR"
-  if [[ ! -f "$ENV_FILE" ]]; then
-    touch "$ENV_FILE"
-  fi
+  [[ -f "$ENV_FILE" ]] || touch "$ENV_FILE"
   local pk_line="ETH_PRIVATE_KEY=0x${PK_HEX}"
   local ipv4="$1"
   local udp_maddr="/ip4/${ipv4}/udp/${P2P_UDP_PORT}/quic-v1"
   local tcp_maddr="/ip4/${ipv4}/tcp/${P2P_TCP_PORT}"
 
-  # Ghi/ghi đè khoá trong .env
   grep -q '^ETH_PRIVATE_KEY=' "$ENV_FILE" && sed -i "s#^ETH_PRIVATE_KEY=.*#${pk_line}#g" "$ENV_FILE" || echo "$pk_line" >>"$ENV_FILE"
   grep -q '^VPS_IP=' "$ENV_FILE" && sed -i "s#^VPS_IP=.*#VPS_IP=${ipv4}#g" "$ENV_FILE" || echo "VPS_IP=${ipv4}" >>"$ENV_FILE"
   grep -q '^EXTERNAL_P2P_MADDR=' "$ENV_FILE" && sed -i "s#^EXTERNAL_P2P_MADDR=.*#EXTERNAL_P2P_MADDR=${udp_maddr}#g" "$ENV_FILE" || echo "EXTERNAL_P2P_MADDR=${udp_maddr}" >>"$ENV_FILE"
   grep -q '^EXTERNAL_P2P_TCP_MADDR=' "$ENV_FILE" && sed -i "s#^EXTERNAL_P2P_TCP_MADDR=.*#EXTERNAL_P2P_TCP_MADDR=${tcp_maddr}#g" "$ENV_FILE" || echo "EXTERNAL_P2P_TCP_MADDR=${tcp_maddr}" >>"$ENV_FILE"
 
+  info "Using Public IP: ${ipv4}"
   info "Wrote ETH_PRIVATE_KEY=0x${PK_HEX:0:4}******${PK_HEX: -6} to $ENV_FILE"
-  info "Wrote VPS_IP=${ipv4} to $ENV_FILE"
-  info "Wrote EXTERNAL_P2P_MADDR=${udp_maddr} to $ENV_FILE"
-  info "Wrote EXTERNAL_P2P_TCP_MADDR=${tcp_maddr} to $ENV_FILE"
+  info "Wrote EXTERNAL_P2P_MADDR=${udp_maddr}"
+  info "Wrote EXTERNAL_P2P_TCP_MADDR=${tcp_maddr}"
 }
 
 ensure_cli() {
@@ -197,59 +220,59 @@ ensure_cli() {
     return 0
   fi
   warn "Drosera CLI not found in PATH."
-
   if [[ "${INSTALL_CLI_WITH_CARGO}" != "1" ]]; then
     return 1
   fi
 
-  info "Attempting to install Drosera CLI via cargo (this may take a while)..."
-  # Cài các gói build cần thiết
+  info "Attempting to install Drosera CLI via cargo..."
   apt_install build-essential pkg-config libssl-dev cmake clang llvm-dev libclang-dev
-  # Cài rustup + cargo
   if ! command -v cargo >/dev/null 2>&1; then
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y >>"$INSTALL_LOG" 2>&1
+    set +e; curl -fsSL https://sh.rustup.rs | sh -s -- -y >>"$INSTALL_LOG" 2>&1; set -e
     export PATH="/root/.cargo/bin:$PATH"
   else
     export PATH="/root/.cargo/bin:$PATH"
   fi
 
-  # Thử cài CLI. Tên crate có thể khác nhau giữa các bản phát hành; cho phép override qua ENV DROSERA_CLI_CRATE
-  local crate="${DROSERA_CLI_CRATE:-drosera-cli}"
-  if ! cargo install "$crate" >>"$INSTALL_LOG" 2>&1; then
-    err "Cargo failed to install $crate. You can set DROSERA_CLI_CRATE hoặc cài thủ công."
-    return 1
-  fi
+  # Thử nhiều tên crate có thể dùng
+  local ok=0
+  for crate in "${DROSERA_CLI_CRATE:-drosera-cli}" drosera "drosera_operator_cli"; do
+    set +e
+    cargo install "$crate" >>"$INSTALL_LOG" 2>&1
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then ok=1; break; fi
+  done
+
   hash -r || true
-  if ! command -v drosera >/dev/null 2>&1; then
-    # Có thể binary tên khác, cho phép override
-    if [[ -n "${DROSERA_CLI_BIN:-}" && -x "$(command -v "${DROSERA_CLI_BIN}")" ]]; then
-      return 0
-    fi
-    err "CLI binary not found after cargo install."
-    return 1
+  if [[ $ok -eq 1 ]] && command -v drosera >/dev/null 2>&1; then
+    info "Drosera CLI installed successfully."
+    return 0
   fi
-  info "Drosera CLI installed successfully."
-  return 0
+
+  # Cho phép override thủ công
+  if [[ -n "${DROSERA_CLI_BIN:-}" && -x "$(command -v "${DROSERA_CLI_BIN}")" ]]; then
+    info "Using CLI binary from DROSERA_CLI_BIN=${DROSERA_CLI_BIN}."
+    return 0
+  fi
+
+  err "Không cài được Drosera CLI qua cargo. Bạn có thể set DROSERA_CLI_CRATE/DROSERA_CLI_BIN."
+  return 1
 }
 
 ensure_trap_project() {
   info "Initializing trap project at $TRAP_PROJECT_DIR ..."
   if [[ -d "$TRAP_PROJECT_DIR/.git" ]]; then
     info "Found existing repo in $TRAP_PROJECT_DIR; syncing deps..."
-    (cd "$TRAP_PROJECT_DIR" && bun install) >>"$INSTALL_LOG" 2>&1 || true
+    set +e; (cd "$TRAP_PROJECT_DIR" && bun install) >>"$INSTALL_LOG" 2>&1; set -e
     return
   fi
-
-  # Nếu bạn có repo template chính thức, set ENV TRAP_TEMPLATE_GIT, ví dụ:
-  # export TRAP_TEMPLATE_GIT="https://github.com/drosera-network/trap-template.git"
   if [[ -n "${TRAP_TEMPLATE_GIT:-}" ]]; then
-    git clone --depth=1 "$TRAP_TEMPLATE_GIT" "$TRAP_PROJECT_DIR" >>"$INSTALL_LOG" 2>&1 || true
+    set +e; git clone --depth=1 "$TRAP_TEMPLATE_GIT" "$TRAP_PROJECT_DIR" >>"$INSTALL_LOG" 2>&1; set -e
   else
-    # Tạo dự án trống tối thiểu thay vì fail
     mkdir -p "$TRAP_PROJECT_DIR"
     echo '{}' > "$TRAP_PROJECT_DIR/package.json"
   fi
-  (cd "$TRAP_PROJECT_DIR" && bun install) >>"$INSTALL_LOG" 2>&1 || true
+  set +e; (cd "$TRAP_PROJECT_DIR" && bun install) >>"$INSTALL_LOG" 2>&1; set -e
 }
 
 drosera_apply_trap() {
@@ -264,7 +287,6 @@ drosera_apply_trap() {
     err "Apply config failed. See $APPLY_LOG"
     return 1
   fi
-  # Cố gắng trích xuất địa chỉ trap & trap_config
   local trap_addr=""
   trap_addr="$(grep -Eoi '0x[a-f0-9]{40}' "$APPLY_LOG" | tail -1 || true)"
   if [[ -n "$trap_addr" ]]; then
@@ -273,22 +295,14 @@ drosera_apply_trap() {
   else
     warn "Could not detect trap address from apply log."
   fi
-
-  # Lưu trap_config nếu có JSON
   if grep -qi 'trap_config' "$APPLY_LOG"; then
-    # trích block JSON thô (best effort)
-    awk '
-      /trap_config/ {injson=1}
-      injson {print}
-    ' "$APPLY_LOG" > "$STATE_DIR/trap_config.raw" || true
+    awk '/trap_config/ {injson=1} injson {print}' "$APPLY_LOG" > "$STATE_DIR/trap_config.raw" || true
   fi
   return 0
 }
 
 drosera_opt_in() {
-  if [[ "$DO_OPTIN" != "1" ]]; then
-    return 0
-  fi
+  [[ "$DO_OPTIN" == "1" ]] || return 0
   local trap_addr="${1:-}"
   if [[ -z "$trap_addr" && -f "$STATE_DIR/trap_address" ]]; then
     trap_addr="$(cat "$STATE_DIR/trap_address")"
@@ -302,7 +316,6 @@ drosera_opt_in() {
   : >"$LOG_DIR/optin.log"
   local cli="${DROSERA_CLI_BIN:-drosera}"
   set +e
-  # Thử nhiều cú pháp (tuỳ phiên bản CLI)
   "$cli" operator opt-in --trap "$trap_addr" --private-key "0x${PK_HEX}" >>"$LOG_DIR/optin.log" 2>&1 \
   || "$cli" opt-in --trap "$trap_addr" --private-key "0x${PK_HEX}" >>"$LOG_DIR/optin.log" 2>&1 \
   || "$cli" trap opt-in "$trap_addr" --private-key "0x${PK_HEX}" >>"$LOG_DIR/optin.log" 2>&1
@@ -322,24 +335,24 @@ drosera_opt_in() {
 
 reset_operator_stack() {
   info "Resetting operator stack (container & volume)..."
-  docker rm -f drosera-operator >/dev/null 2>&1 || true
-  docker volume rm -f drosera-network_drosera_data >/dev/null 2>&1 || true
+  set +e
+  docker rm -f drosera-operator >/dev/null 2>&1
+  docker volume rm -f drosera-network_drosera_data >/dev/null 2>&1
+  set -e
 }
 
 start_operator() {
   info "Pulling latest operator image..."
-  docker pull "$DROSERA_OPERATOR_IMAGE" >/dev/null 2>&1 || true
+  set +e; docker pull "$DROSERA_OPERATOR_IMAGE" >>"$INSTALL_LOG" 2>&1; set -e
 
   info "Starting operator stack..."
-  # Tạo volume trước
   docker volume create drosera-network_drosera_data >/dev/null
 
-  # Nạp ENV từ .env
   set -a
   source "$ENV_FILE"
   set +a
 
-  # Chạy container
+  set +e
   docker run -d \
     --name drosera-operator \
     --restart unless-stopped \
@@ -347,24 +360,20 @@ start_operator() {
     -p "${P2P_UDP_PORT}:${P2P_UDP_PORT}/udp" \
     -v drosera-network_drosera_data:/data \
     --env-file "$ENV_FILE" \
-    "$DROSERA_OPERATOR_IMAGE" >/dev/null
+    "$DROSERA_OPERATOR_IMAGE" >/dev/null 2>&1
+  set -e
 
-  # Đợi container ổn định bằng cách theo dõi log cho tới khi "Operator Node successfully spawned!"
   info "Waiting up to 180s for container 'drosera-operator' to stabilize..."
   local ok=0
   for i in {1..36}; do
-    # container phải Up
     if ! docker ps --format '{{.Names}} {{.Status}}' | grep -q '^drosera-operator .*Up'; then
       sleep 5; continue
     fi
-    # kiểm tra log
     if docker logs --since=30s drosera-operator 2>/dev/null | grep -q 'Operator Node successfully spawned'; then
       ok=1; break
     fi
-    # Nếu thấy vòng lặp restart nhanh: xem có lỗi "invalid protocol string" → thường do multiaddr sai
     if docker logs --since=10s drosera-operator 2>/dev/null | grep -qi 'invalid protocol string'; then
-      warn "Operator reports invalid protocol string; check EXTERNAL_P2P_* in $ENV_FILE."
-      # vẫn chờ thêm vài vòng để tự heal
+      warn "Operator reports invalid protocol string; kiểm tra EXTERNAL_P2P_* trong $ENV_FILE."
     fi
     sleep 5
   done
@@ -388,29 +397,21 @@ register_operator() {
       info "Operator was already registered with this private key; skipping register."
       return 0
     fi
-    # Nếu container chưa sẵn sàng nhận lệnh (đang restart)
-    if grep -qi 'is restarting, wait until the container is running' "$REGISTER_LOG"; then
-      # retry có backoff
-      local delay=10
-      for n in 1 2 3 4; do
-        warn "Register attempt failed; retrying in ${delay}s..."
-        sleep "$delay"
-        set +e
-        docker exec drosera-operator /bin/sh -lc 'drosera-operator register' >>"$REGISTER_LOG" 2>&1
-        rc=$?
-        set -e
-        if [[ $rc -eq 0 ]]; then break; fi
-        delay=$((delay*2))
-      done
-      if [[ $rc -ne 0 ]]; then
-        warn "Register command failed; see $REGISTER_LOG"
-        return 1
-      fi
-      info "Register successful."
-      return 0
+    local delay=10
+    for n in 1 2 3 4; do
+      warn "Register attempt failed; retrying in ${delay}s..."
+      sleep "$delay"
+      set +e
+      docker exec drosera-operator /bin/sh -lc 'drosera-operator register' >>"$REGISTER_LOG" 2>&1
+      rc=$?
+      set -e
+      if [[ $rc -eq 0 ]]; then break; fi
+      delay=$((delay*2))
+    done
+    if [[ $rc -ne 0 ]]; then
+      warn "Register command failed; see $REGISTER_LOG"
+      return 1
     fi
-    warn "Register command failed; see $REGISTER_LOG"
-    return 1
   fi
   info "Register successful."
   return 0
@@ -431,7 +432,7 @@ show_menu() {
     read -r sel
     case "$sel" in
       1) ensure_base; ensure_docker; ensure_bun; ensure_foundry; ensure_cli || true;;
-      2) ensure_trap_project; drosera_apply_trap || true;;
+      2) ensure_trap_project; ( cd "$TRAP_PROJECT_DIR" && drosera_apply_trap ) || true;;
       3) drosera_opt_in "" || true;;
       4) reset_operator_stack; start_operator || true;;
       5) register_operator || true;;
@@ -451,23 +452,17 @@ main() {
   ensure_bun
   ensure_foundry
 
-  # Lấy IPv4 công khai
-  local ipv4
-  ipv4="$(get_public_ipv4)"
+  local ipv4; ipv4="$(get_public_ipv4)"
   if [[ -z "$ipv4" ]]; then
-    err "Không lấy được Public IPv4. Kiểm tra kết nối mạng/Firewall."
+    err "Không lấy được Public IPv4. Kiểm tra mạng/Firewall."
     exit 1
   fi
-  info "Using Public IP: $ipv4"
 
-  # PK: ưu tiên --pk; nếu không có, thử đọc từ .env cũ
   if [[ -z "$PK_HEX" ]]; then
     if [[ -f "$ENV_FILE" ]]; then
       local prev_pk
       prev_pk="$(grep -E '^ETH_PRIVATE_KEY=' "$ENV_FILE" | sed -E 's/^ETH_PRIVATE_KEY=0x//' || true)"
-      if [[ -n "$prev_pk" ]]; then
-        PK_HEX="$prev_pk"
-      fi
+      [[ -n "$prev_pk" ]] && PK_HEX="$prev_pk"
     fi
   fi
   if [[ -z "$PK_HEX" ]]; then
@@ -475,25 +470,20 @@ main() {
     exit 2
   fi
 
-  # Ghi .env
   mkdir -p "$NETWORK_REPO_DIR"
   write_env_file "$ipv4"
 
-  # Menu?
   if [[ "$SHOW_MENU" == "1" ]]; then
-    show_menu
-    exit 0
+    show_menu; exit 0
   fi
 
-  # Nếu không phải operator-only → cần CLI & trap/optin
   if [[ "$DO_TRAP" == "1" || "$DO_OPTIN" == "1" ]]; then
     if ! ensure_cli; then
       if [[ "$AUTO_MODE" == "1" ]]; then
         err "Drosera CLI thiếu và không cài được (AUTO mode). Dừng để tránh trạng thái nửa vời."
         exit 3
       else
-        echo
-        read -r -p "Drosera CLI không sẵn sàng. Bạn muốn (R)etry cài CLI, (O)perator only, (E)xit? [R/O/E]: " ans
+        read -r -p "CLI chưa sẵn sàng. (R)etry cài, (O)perator-only, (E)xit? [R/O/E]: " ans
         case "${ans^^}" in
           R) ensure_cli || { err "Cài CLI thất bại."; exit 3; };;
           O) DO_TRAP=0; DO_OPTIN=0;;
@@ -503,7 +493,6 @@ main() {
     fi
   fi
 
-  # Tạo/sync dự án trap và apply (nếu bật)
   if [[ "$DO_TRAP" == "1" ]]; then
     ensure_trap_project
     ( cd "$TRAP_PROJECT_DIR" && drosera_apply_trap ) || {
@@ -512,16 +501,13 @@ main() {
     }
   fi
 
-  # Opt-in nếu bật
   if [[ "$DO_OPTIN" == "1" ]]; then
     drosera_opt_in "" || warn "Opt-in có thể chưa hoàn tất; xem $LOG_DIR/optin.log"
   fi
 
-  # Luôn reset & start operator để nhận cấu hình mới
   reset_operator_stack || true
   start_operator || warn "Operator chưa ổn định; xem: docker logs -f drosera-operator"
 
-  # Register operator (idempotent)
   register_operator || true
 
   info "Done."
