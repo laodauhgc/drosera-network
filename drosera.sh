@@ -3,13 +3,13 @@ set -Eeuo pipefail
 
 # =========================================
 #  Drosera One-Click (aligned with original)
-#  v1.3.1 (fix 429 & PS1, resilient installer)
+#  v1.3.2 (fix re-init trap when missing drosera.toml)
 # =========================================
 
-# ---- PATH (giống script gốc, KHÔNG source .bashrc) ----
+# ---- PATH (giữ như script gốc; KHÔNG source .bashrc trong non-interactive) ----
 export PATH="$PATH:/root/.drosera/bin:/root/.bun/bin:/root/.foundry/bin"
 
-# ---- Config mặc định (có thể override bằng ENV) ----
+# ---- Config mặc định ----
 TRAP_DIR="${TRAP_DIR:-/root/my-drosera-trap}"
 NET_DIR="${NET_DIR:-/root/drosera-network}"
 ENV_FILE="$NET_DIR/.env"
@@ -140,7 +140,6 @@ ensure_bun(){
   if ! command -v bun >/dev/null 2>&1; then
     ok "Installing Bun..."
     curl -fsSL https://bun.sh/install | bash >>"$INSTALL_LOG" 2>&1 || true
-    # KHÔNG source .bashrc; chỉ export tức thời & ghi thêm để lần sau tự có
     export PATH="$PATH:/root/.bun/bin"
     grep -q '/root/.bun/bin' /root/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/root/.bun/bin' >> /root/.bashrc
   fi
@@ -159,7 +158,6 @@ ensure_foundry(){
 }
 
 ensure_drosera_cli(){
-  # CÀI QUA app.drosera.io/install với retry/backoff, KHÔNG source .bashrc
   if ! command -v drosera >/dev/null 2>&1; then
     ok "Installing Drosera CLI from app.drosera.io..."
     local tmp="/tmp/drosera_install.sh"
@@ -175,7 +173,6 @@ ensure_drosera_cli(){
         bash "$tmp" >>"$INSTALL_LOG" 2>&1 || true
         break
       fi
-      # 429 hoặc các lỗi HTTP → rc có thể = 22; xử lý như rate-limit
       local sleep_s=$(( 2 ** (attempt-1) ))
       local jitter=$(( RANDOM % 5 ))
       sleep_s=$(( sleep_s + jitter ))
@@ -183,31 +180,25 @@ ensure_drosera_cli(){
       sleep "$sleep_s"
       attempt=$((attempt+1))
     done
-    # droseraup nếu có
     if command -v droseraup >/dev/null 2>&1; then
       droseraup >>"$INSTALL_LOG" 2>&1 || true
     fi
     export PATH="$PATH:/root/.drosera/bin"
     grep -q '/root/.drosera/bin' /root/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/root/.drosera/bin' >> /root/.bashrc
   else
-    # Đã có drosera → cập nhật
-    if command -v droseraup >/dev/null 2>&1; then
-      droseraup >>"$INSTALL_LOG" 2>&1 || true
-    fi
+    command -v droseraup >/dev/null 2>&1 && droseraup >>"$INSTALL_LOG" 2>&1 || true
   fi
 
   if ! command -v drosera >/dev/null 2>&1; then
-    err "Không tìm thấy 'drosera' sau khi cài (có thể bị rate-limit quá lâu). Xem $INSTALL_LOG"; exit 1
+    err "Không tìm thấy 'drosera' sau khi cài. Xem $INSTALL_LOG"; exit 1
   fi
-  # Xác nhận có 'apply'
   if drosera --help 2>&1 | grep -qE '\bapply\b'; then
     ok "Drosera CLI sẵn sàng (có 'apply')."
   else
-    warn "Drosera CLI chưa có 'apply'. Thử chạy droseraup thêm lần nữa..."
+    warn "Drosera CLI chưa có 'apply'. Thử droseraup..."
     command -v droseraup >/dev/null 2>&1 && droseraup >>"$INSTALL_LOG" 2>&1 || true
     if ! drosera --help 2>&1 | grep -qE '\bapply\b'; then
-      err "Drosera CLI vẫn thiếu 'apply'. Hãy chạy lại sau ít phút khi server installer hết rate-limit."
-      exit 1
+      err "Drosera CLI vẫn thiếu 'apply'. Hãy chạy lại sau khi hết rate-limit."; exit 1
     fi
   fi
 }
@@ -218,14 +209,37 @@ evm_address_from_pk(){
   echo -n "$addr"
 }
 
+# ====== FIX: Re-init trap khi thiếu drosera.toml ======
 init_trap_project(){
   ok "Preparing trap project at $TRAP_DIR ..."
+  local need_reinit=0
+
   if [[ ! -d "$TRAP_DIR" ]]; then
-    mkdir -p "$TRAP_DIR"
-    pushd "$TRAP_DIR" >/dev/null
-    forge init -t "$TEMPLATE_REPO" >>"$INSTALL_LOG" 2>&1 || true
-    popd >/dev/null
+    need_reinit=1
+  elif [[ ! -f "$TRAP_DIR/drosera.toml" ]]; then
+    need_reinit=1
   fi
+
+  if (( need_reinit )); then
+    if [[ -d "$TRAP_DIR" && $(ls -A "$TRAP_DIR" 2>/dev/null | wc -l) -gt 0 ]]; then
+      local bak="${TRAP_DIR}.bak.$(date +%s)"
+      warn "Thư mục $TRAP_DIR tồn tại nhưng thiếu drosera.toml → backup: $bak"
+      mv "$TRAP_DIR" "$bak"
+    fi
+    rm -rf "$TRAP_DIR"
+    # Try forge init template
+    if forge init -t "$TEMPLATE_REPO" "$TRAP_DIR" >>"$INSTALL_LOG" 2>&1; then
+      ok "Initialized trap from template ($TEMPLATE_REPO)."
+    else
+      warn "forge init failed, fallback to git clone..."
+      git clone "https://github.com/${TEMPLATE_REPO}.git" "$TRAP_DIR" >>"$INSTALL_LOG" 2>&1 || true
+    fi
+  fi
+
+  if [[ ! -f "$TRAP_DIR/drosera.toml" ]]; then
+    err "Vẫn không tìm thấy drosera.toml sau khi re-init. Xem $INSTALL_LOG"; exit 1
+  fi
+
   pushd "$TRAP_DIR" >/dev/null
   bun install >>"$INSTALL_LOG" 2>&1 || true
   forge build >>"$INSTALL_LOG" 2>&1 || true
@@ -234,9 +248,6 @@ init_trap_project(){
 
 ensure_whitelist(){
   local addr="$1"; local toml="$TRAP_DIR/drosera.toml"
-  if [[ ! -f "$toml" ]]; then
-    err "Không tìm thấy $toml — kiểm tra cài đặt Drosera/template."; exit 1
-  fi
   cp -f "$toml" "${toml}.bak" || true
   if grep -q '^whitelist = ' "$toml"; then
     sed -i 's|^whitelist = .*|whitelist = ["'"$addr"'"]|' "$toml"
@@ -258,7 +269,7 @@ ensure_whitelist(){
 run_apply_and_get_trap(){
   : >"$APPLY_LOG"
   pushd "$TRAP_DIR" >/dev/null
-  export DROSERA_PRIVATE_KEY="$1"   # KHÔNG 0x (theo script gốc)
+  export DROSERA_PRIVATE_KEY="$1"   # không 0x
   ok 'Running: echo "ofc" | drosera apply'
   if echo "ofc" | drosera apply >>"$APPLY_LOG" 2>&1; then
     ok "drosera apply completed."
@@ -444,7 +455,7 @@ main(){
   fi
   ok "EVM address: $EVM_ADDR"
 
-  init_trap_project
+  init_trap_project                    # <— đã vá re-init khi thiếu drosera.toml
   ensure_whitelist "$EVM_ADDR"
 
   local trap; trap="$(run_apply_and_get_trap "$PK_HEX")"
