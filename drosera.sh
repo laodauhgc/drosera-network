@@ -3,10 +3,10 @@ set -Eeuo pipefail
 
 # =========================================
 #  Drosera One-Click (aligned with original)
-#  v1.3.0
+#  v1.3.1 (fix 429 & PS1, resilient installer)
 # =========================================
 
-# ---- PATH (giống script gốc) ----
+# ---- PATH (giống script gốc, KHÔNG source .bashrc) ----
 export PATH="$PATH:/root/.drosera/bin:/root/.bun/bin:/root/.foundry/bin"
 
 # ---- Config mặc định (có thể override bằng ENV) ----
@@ -26,21 +26,16 @@ OP_IMAGE="${OP_IMAGE:-ghcr.io/drosera-network/drosera-operator:v1.20.0}"
 P2P_TCP="${P2P_TCP:-31313}"
 P2P_UDP="${P2P_UDP:-31313}"
 
-# RPC/Chain (nếu dùng subcommand có yêu cầu tham số — để trống nếu operator tự lấy)
 ETH_CHAIN_ID="${ETH_CHAIN_ID:-}"     # ví dụ 560048
 ETH_RPC_URL="${ETH_RPC_URL:-}"       # ví dụ https://0xrpc.io/hoodi
 DROSERA_ADDR="${DROSERA_ADDR:-}"     # ví dụ 0x91cB447BaF...
 
-# BloomBoost
 DO_BLOOMBOOST="${DO_BLOOMBOOST:-0}"
-BLOOM_ETH_AMT="${BLOOM_ETH_AMT:-}"   # ví dụ 0.01
+BLOOM_ETH_AMT="${BLOOM_ETH_AMT:-}"
 
-# Hành vi
 AUTO=0
-DO_ALL=1
 RUN_OPTIN=1
 
-# ---- Helpers ----
 ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
 ok(){ echo -e "$(ts)  $*"; }
 warn(){ echo -e "$(ts)  \e[33mWARNING:\e[0m $*"; }
@@ -55,18 +50,16 @@ Usage:
 
 Options:
   --pk <hex>       Private key (64 hex, có/không '0x').
-  --auto           Chạy full tự động, không hỏi (install + trap + apply + [.env] + operator + register + opt-in).
-  --no-optin       Bỏ qua opt-in operator vào trap (vẫn tạo trap).
-  --bloom <eth>    Thực hiện drosera bloomboost với số ETH chỉ định (ví dụ 0.01).
-  --image <ref>    Thay operator image (mặc định: $OP_IMAGE).
+  --auto           Chạy full tự động (install + trap + apply + [.env] + operator + register + opt-in).
+  --no-optin       Bỏ qua opt-in operator vào trap.
+  --bloom <eth>    drosera bloomboost với số ETH (vd: 0.01).
+  --image <ref>    Đổi operator image (mặc định: $OP_IMAGE).
   --help           Trợ giúp.
 
-ENV có thể hữu ích:
+ENV hữu ích:
   TEMPLATE_REPO=drosera-network/trap-foundry-template
   NET_DIR=/root/drosera-network
-  ETH_CHAIN_ID=...
-  ETH_RPC_URL=...
-  DROSERA_ADDR=...
+  ETH_CHAIN_ID=...   ETH_RPC_URL=...   DROSERA_ADDR=...
 USAGE
 }
 
@@ -86,7 +79,6 @@ done
 
 require_root
 
-# ---- APT với retry đơn giản ----
 apt_quiet(){
   DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confold" "$@" >>"$INSTALL_LOG" 2>&1
 }
@@ -95,7 +87,6 @@ apt_install(){
   DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confold" "$@" >>"$INSTALL_LOG" 2>&1 || true
 }
 
-# ---- Net/IP ----
 get_public_ip(){
   local ip=""
   ip="$(curl -4fsSL https://api.ipify.org || true)"
@@ -104,7 +95,6 @@ get_public_ip(){
   echo -n "$ip"
 }
 
-# ---- Sanitize/validate PK ----
 sanitize_pk(){
   local pk="$1"
   pk="${pk#0x}"
@@ -115,7 +105,6 @@ sanitize_pk(){
   echo -n "$pk"
 }
 
-# ---- Base deps ----
 ensure_deps(){
   ok "Updating apt & installing base packages..."
   apt_install curl ca-certificates gnupg lsb-release jq git unzip make build-essential pkg-config libssl-dev clang cmake
@@ -136,9 +125,9 @@ ensure_docker(){
 
 ensure_compose(){
   if docker compose version >/dev/null 2>&1; then
-    : # plugin có sẵn
+    : # plugin OK
   elif command -v docker-compose >/dev/null 2>&1; then
-    : # binary standalone
+    : # standalone OK
   else
     ok "Installing docker-compose..."
     curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
@@ -151,8 +140,9 @@ ensure_bun(){
   if ! command -v bun >/dev/null 2>&1; then
     ok "Installing Bun..."
     curl -fsSL https://bun.sh/install | bash >>"$INSTALL_LOG" 2>&1 || true
-    echo 'export PATH=$PATH:/root/.bun/bin' >> /root/.bashrc
+    # KHÔNG source .bashrc; chỉ export tức thời & ghi thêm để lần sau tự có
     export PATH="$PATH:/root/.bun/bin"
+    grep -q '/root/.bun/bin' /root/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/root/.bun/bin' >> /root/.bashrc
   fi
 }
 
@@ -161,45 +151,73 @@ ensure_foundry(){
     ok "Installing Foundry..."
     curl -fsSL https://foundry.paradigm.xyz | bash >>"$INSTALL_LOG" 2>&1 || true
     [[ -x /root/.foundry/bin/foundryup ]] && /root/.foundry/bin/foundryup >>"$INSTALL_LOG" 2>&1 || true
-    echo 'export PATH=$PATH:/root/.foundry/bin' >> /root/.bashrc
     export PATH="$PATH:/root/.foundry/bin"
+    grep -q '/root/.foundry/bin' /root/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/root/.foundry/bin' >> /root/.bashrc
   else
     /root/.foundry/bin/foundryup >>"$INSTALL_LOG" 2>&1 || true
   fi
 }
 
 ensure_drosera_cli(){
-  # BÁM SÁT SCRIPT GỐC: cài qua app.drosera.io + droseraup
-  if ! command -v droseraup >/dev/null 2>&1 || ! command -v drosera >/dev/null 2>&1; then
+  # CÀI QUA app.drosera.io/install với retry/backoff, KHÔNG source .bashrc
+  if ! command -v drosera >/dev/null 2>&1; then
     ok "Installing Drosera CLI from app.drosera.io..."
-    curl -fsSL https://app.drosera.io/install | bash >>"$INSTALL_LOG" 2>&1 || true
-    source /root/.bashrc || true
+    local tmp="/tmp/drosera_install.sh"
+    local max=10
+    local attempt=1
+    while (( attempt <= max )); do
+      rm -f "$tmp"
+      set +e
+      curl -fsSL https://app.drosera.io/install -o "$tmp"
+      local rc=$?
+      set -e
+      if [[ $rc -eq 0 && -s "$tmp" ]]; then
+        bash "$tmp" >>"$INSTALL_LOG" 2>&1 || true
+        break
+      fi
+      # 429 hoặc các lỗi HTTP → rc có thể = 22; xử lý như rate-limit
+      local sleep_s=$(( 2 ** (attempt-1) ))
+      local jitter=$(( RANDOM % 5 ))
+      sleep_s=$(( sleep_s + jitter ))
+      warn "Drosera installer download failed (rc=$rc), retry $attempt/$max after ${sleep_s}s..."
+      sleep "$sleep_s"
+      attempt=$((attempt+1))
+    done
+    # droseraup nếu có
+    if command -v droseraup >/dev/null 2>&1; then
+      droseraup >>"$INSTALL_LOG" 2>&1 || true
+    fi
     export PATH="$PATH:/root/.drosera/bin"
-  fi
-  if command -v droseraup >/dev/null 2>&1; then
-    droseraup >>"$INSTALL_LOG" 2>&1 || true
-  fi
-  if ! command -v drosera >/devnull 2>&1; then
-    err "Không tìm thấy 'drosera' sau khi cài. Xem $INSTALL_LOG"; exit 1
+    grep -q '/root/.drosera/bin' /root/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/root/.drosera/bin' >> /root/.bashrc
+  else
+    # Đã có drosera → cập nhật
+    if command -v droseraup >/dev/null 2>&1; then
+      droseraup >>"$INSTALL_LOG" 2>&1 || true
+    fi
   fi
 
-  # Xác nhận CLI hỗ trợ 'apply'
+  if ! command -v drosera >/dev/null 2>&1; then
+    err "Không tìm thấy 'drosera' sau khi cài (có thể bị rate-limit quá lâu). Xem $INSTALL_LOG"; exit 1
+  fi
+  # Xác nhận có 'apply'
   if drosera --help 2>&1 | grep -qE '\bapply\b'; then
     ok "Drosera CLI sẵn sàng (có 'apply')."
   else
-    err "Drosera CLI không có subcommand 'apply'. Hãy chạy lại installer hoặc kiểm tra phiên bản."
-    exit 1
+    warn "Drosera CLI chưa có 'apply'. Thử chạy droseraup thêm lần nữa..."
+    command -v droseraup >/dev/null 2>&1 && droseraup >>"$INSTALL_LOG" 2>&1 || true
+    if ! drosera --help 2>&1 | grep -qE '\bapply\b'; then
+      err "Drosera CLI vẫn thiếu 'apply'. Hãy chạy lại sau ít phút khi server installer hết rate-limit."
+      exit 1
+    fi
   fi
 }
 
-# ---- EVM address từ PK (cast) ----
 evm_address_from_pk(){
   local pk="$1"; local addr=""
   addr="$(cast wallet address --private-key "0x$pk" 2>/dev/null || true)"
   echo -n "$addr"
 }
 
-# ---- Tạo dự án trap & build ----
 init_trap_project(){
   ok "Preparing trap project at $TRAP_DIR ..."
   if [[ ! -d "$TRAP_DIR" ]]; then
@@ -214,7 +232,6 @@ init_trap_project(){
   popd >/dev/null
 }
 
-# ---- Chèn whitelist vào drosera.toml ----
 ensure_whitelist(){
   local addr="$1"; local toml="$TRAP_DIR/drosera.toml"
   if [[ ! -f "$toml" ]]; then
@@ -224,7 +241,6 @@ ensure_whitelist(){
   if grep -q '^whitelist = ' "$toml"; then
     sed -i 's|^whitelist = .*|whitelist = ["'"$addr"'"]|' "$toml"
   else
-    # Thêm dưới [traps.mytrap] nếu có, nếu không thì append cuối file
     if grep -q '^\[traps\.mytrap\]' "$toml"; then
       awk -v addr="$addr" '
         BEGIN{printed=0}
@@ -239,34 +255,26 @@ ensure_whitelist(){
   ok "Wrote whitelist = [$addr] to drosera.toml"
 }
 
-# ---- drosera apply & lấy trapAddress ----
 run_apply_and_get_trap(){
   : >"$APPLY_LOG"
   pushd "$TRAP_DIR" >/dev/null
-  # export DROSERA_PRIVATE_KEY (KHÔNG 0x) theo đúng script gốc
-  export DROSERA_PRIVATE_KEY="$1"
-  ok "Running: echo \"ofc\" | drosera apply"
+  export DROSERA_PRIVATE_KEY="$1"   # KHÔNG 0x (theo script gốc)
+  ok 'Running: echo "ofc" | drosera apply'
   if echo "ofc" | drosera apply >>"$APPLY_LOG" 2>&1; then
     ok "drosera apply completed."
   else
     err "drosera apply thất bại. Xem $APPLY_LOG"; popd >/dev/null; exit 1
   fi
-
-  # Tìm trapAddress trong drosera.log (bám sát script gốc)
   local trap=""
   if [[ -f "$TRAP_DIR/drosera.log" ]]; then
     trap="$(grep -oE 'trapAddress: 0x[a-fA-F0-9]{40}' "$TRAP_DIR/drosera.log" | awk '{print $2}' | tail -1 || true)"
   fi
-  if [[ -z "$trap" ]]; then
-    # fallback: quét cả APPLY_LOG
-    trap="$(grep -oE '0x[a-fA-F0-9]{40}' "$APPLY_LOG" | tail -1 || true)"
-  fi
+  [[ -z "$trap" ]] && trap="$(grep -oE '0x[a-fA-F0-9]{40}' "$APPLY_LOG" | tail -1 || true)"
   echo -n "$trap" > "$TRAP_SCAN_LOG"
   popd >/dev/null
   echo -n "$trap"
 }
 
-# ---- BloomBoost (tùy chọn) ----
 maybe_bloomboost(){
   [[ "$DO_BLOOMBOOST" != "1" ]] && return 0
   [[ -z "$BLOOM_ETH_AMT" ]] && { warn "Bỏ qua bloomboost vì thiếu --bloom <eth>"; return 0; }
@@ -282,7 +290,6 @@ maybe_bloomboost(){
   popd >/dev/null
 }
 
-# ---- Repo drosera-network + .env ----
 prepare_network_repo(){
   if [[ ! -d "$NET_DIR/.git" ]]; then
     ok "Cloning drosera-network repo..."
@@ -319,7 +326,6 @@ prepare_network_repo(){
   ok "Wrote .env with PK and P2P addrs at $ENV_FILE"
 }
 
-# ---- Operator: run + register + opt-in ----
 reset_and_run_operator(){
   ok "Resetting operator container..."
   docker rm -f drosera-operator >/dev/null 2>&1 || true
@@ -339,7 +345,6 @@ reset_and_run_operator(){
     --env-file "$ENV_FILE" \
     "$OP_IMAGE" >/dev/null
 
-  # Đợi ổn định
   for i in {1..36}; do
     if docker logs --since=20s drosera-operator 2>/dev/null | grep -q 'Operator Node successfully spawned'; then
       ok "Operator Node successfully spawned."
@@ -356,14 +361,12 @@ register_operator(){
   : >"$REG_LOG"
   set +e
   if [[ -n "$ETH_CHAIN_ID" || -n "$ETH_RPC_URL" || -n "$DROSERA_ADDR" ]]; then
-    # Nếu bạn muốn ép tham số y như script gốc:
     docker exec drosera-operator /bin/sh -lc \
       "drosera-operator register \
       ${ETH_CHAIN_ID:+--eth-chain-id $ETH_CHAIN_ID} \
       ${ETH_RPC_URL:+--eth-rpc-url $ETH_RPC_URL} \
       ${DROSERA_ADDR:+--drosera-address $DROSERA_ADDR}" >>"$REG_LOG" 2>&1
   else
-    # Mặc định: để operator tự đọc config từ ENV
     docker exec drosera-operator /bin/sh -lc 'drosera-operator register' >>"$REG_LOG" 2>&1
   fi
   local rc=$?
@@ -430,40 +433,32 @@ main(){
   ensure_foundry
   ensure_drosera_cli
 
-  # Private key
   if [[ -z "$PK_HEX" ]]; then
     err "Thiếu --pk <hex>."; exit 2
   fi
   PK_HEX="$(sanitize_pk "$PK_HEX")"
 
-  # EVM address
   local EVM_ADDR; EVM_ADDR="$(evm_address_from_pk "$PK_HEX")"
   if [[ ! "$EVM_ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     err "Không lấy được EVM address từ private key."; exit 1
   fi
   ok "EVM address: $EVM_ADDR"
 
-  # Trap project
   init_trap_project
   ensure_whitelist "$EVM_ADDR"
 
-  # Apply & get trap
   local trap; trap="$(run_apply_and_get_trap "$PK_HEX")"
   if [[ -z "$trap" ]]; then
-    warn "Không trích xuất được trapAddress từ log. Bạn có thể kiểm tra $TRAP_DIR/drosera.log hoặc $APPLY_LOG."
+    warn "Không trích xuất được trapAddress từ log. Kiểm tra $TRAP_DIR/drosera.log hoặc $APPLY_LOG."
   else
     ok "Detected trapAddress: $trap"
   fi
 
-  # BloomBoost optional
   if [[ "$DO_BLOOMBOOST" == "1" && -n "${trap:-}" ]]; then
     maybe_bloomboost "$trap" "$PK_HEX"
   fi
 
-  # drosera-network repo + .env
   prepare_network_repo
-
-  # Operator
   reset_and_run_operator
   register_operator
   if [[ -n "${trap:-}" ]]; then
