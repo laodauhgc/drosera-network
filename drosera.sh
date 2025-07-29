@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 #
 # drosera.sh — Best-practice installer & operator helper for Drosera
-# Version: 1.1.1 
+# Version: 1.1.2
 #
 # Changelog
-# - v1.1.1: AUTO mode now writes ETH_PRIVATE_KEY to /root/drosera-network/.env (normalized 64-hex, no 0x)
+# - v1.1.2: Fix drosera apply dry-run failure by NORMALIZING drosera.toml to HelloWorld defaults in Menu 1:
+#           path = out/HelloWorldTrap.sol/HelloWorldTrap.json
+#           response_function = "helloworld(string)"
+#           response_contract = $DRO_RESPONDER_CONTRACT (kept from defaults)
+#           Also removes 'version:' key from docker-compose.yaml on first compose up to silence deprecation warning.
+# - v1.1.1: AUTO mode writes ETH_PRIVATE_KEY (normalized 64-hex, no 0x) to /root/drosera-network/.env,
 #           to fix docker operator crash "Failed to parse private key (odd number of digits)".
-#           Also masks key preview and restarts stack cleanly.
 # - v1.1.0: Menu 1 full-auto; new flags --auto, --eth-amount, --trap-address; auto confirms.
 # - v1.0.3: Fix bloomboost confirm via piping "ofc"; force UTF-8 locale to prevent Rust stdin UTF-8 panic.
 # - v1.0.2: Robust trap address parsing & zero-address guard.
@@ -23,7 +27,7 @@ export LANG="${LANG:-C.UTF-8}"
 #                 CONFIG                    #
 ############################################
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.1.2"
 SCRIPT_DATE="2025-07-30"
 
 # --- Flags / CLI options ---
@@ -77,6 +81,7 @@ ROOT_DIR="/root"
 TRAP_DIR="${ROOT_DIR}/my-drosera-trap"
 NET_DIR="${ROOT_DIR}/drosera-network"
 ENV_FILE="${NET_DIR}/.env"
+COMPOSE_FILE="${NET_DIR}/docker-compose.yaml"
 LOG_DIR="/var/log/drosera"
 mkdir -p "${LOG_DIR}"
 
@@ -256,8 +261,42 @@ post_install_env() {
 }
 
 ############################################
+#       NORMALIZE drosera.toml (HelloWorld) #
+############################################
+
+normalize_drosera_toml_helloworld() {
+  local toml="${TRAP_DIR}/drosera.toml"
+  [[ -f "$toml" ]] || { echo "ERROR: ${toml} not found."; exit 1; }
+  cp -f "$toml" "${toml}.bak.$(date +%s)"
+
+  # path => HelloWorldTrap artifact
+  if grep -q '^path[[:space:]]*=' "$toml"; then
+    sed -i 's|^path[[:space:]]*=.*|path = "out/HelloWorldTrap.sol/HelloWorldTrap.json"|' "$toml"
+  else
+    echo 'path = "out/HelloWorldTrap.sol/HelloWorldTrap.json"' >> "$toml"
+  fi
+
+  # response_contract => default responder
+  if grep -q '^response_contract[[:space:]]*=' "$toml"; then
+    sed -i "s|^response_contract[[:space:]]*=.*|response_contract = \"${DRO_RESPONDER_CONTRACT}\"|" "$toml"
+  else
+    echo "response_contract = \"${DRO_RESPONDER_CONTRACT}\"" >> "$toml"
+  fi
+
+  # response_function => helloworld(string)
+  if grep -q '^response_function[[:space:]]*=' "$toml"; then
+    sed -i 's|^response_function[[:space:]]*=.*|response_function = "helloworld(string)"|' "$toml"
+  else
+    echo 'response_function = "helloworld(string)"' >> "$toml"
+  fi
+}
+
+############################################
 #            HELPERS: TRAP ADDRESS          #
 ############################################
+
+validate_evm_address() { [[ "${1:-}" =~ ^0x[0-9a-fA-F]{40}$ ]]; }
+is_zero_address() { [[ "${1,,}" == "0x0000000000000000000000000000000000000000" ]]; }
 
 extract_trap_address_from_apply_log() {
   local log="${LOG_DIR}/apply.log"
@@ -300,8 +339,12 @@ init_trap_project() {
   forge build   2>&1 | tee_log "forge_build.log" || { echo "forge build failed"; exit 1; }
 }
 
-safe_edit_drosera_toml_whitelist() {
+safe_edit_drosera_toml_whitelist_and_normalize() {
   local toml="${TRAP_DIR}/drosera.toml"; [[ -f "$toml" ]] || { echo "ERROR: ${toml} not found."; exit 1; }
+
+  # Always normalize to HelloWorld defaults for Menu 1 to avoid mismatch from prior Cadet edits
+  normalize_drosera_toml_helloworld
+
   local pk addr; pk="$(obtain_pk)" || exit 1; addr="$(get_evm_address_from_pk "$pk")" || exit 1; echo "Your EVM address: ${addr}"
   cp -f "$toml" "${toml}.bak.$(date +%s)"
   awk -v addr="$addr" '
@@ -385,7 +428,7 @@ setup_operator_stack() {
     [[ -n "${vps_ip:-}" ]] && sed -i "s|^VPS_IP=.*|VPS_IP=${vps_ip}|" "${ENV_FILE}" || true
   fi
 
-  # Write ETH_PRIVATE_KEY in AUTO (and when a key is available)
+  # Write ETH_PRIVATE_KEY in AUTO (and when a key is available) — normalized w/o 0x
   local pk="${DROSERA_PK_CACHE:-}"
   if [[ -z "$pk" ]]; then pk="$(obtain_pk || true)"; fi
   if [[ -n "$pk" ]]; then
@@ -404,15 +447,21 @@ setup_operator_stack() {
     echo "WARNING: No PK available to write ETH_PRIVATE_KEY to ${ENV_FILE}."
   fi
 
-  [[ -f docker-compose.yaml ]] || { echo "ERROR: docker-compose.yaml not found in ${NET_DIR}" >&2; exit 1; }
-  dc -f docker-compose.yaml config >/dev/null
+  [[ -f "${COMPOSE_FILE}" ]] || { echo "ERROR: docker-compose.yaml not found in ${NET_DIR}" >&2; exit 1; }
+
+  # Remove obsolete 'version:' key once to avoid warning
+  if grep -qE '^\s*version\s*:' "${COMPOSE_FILE}"; then
+    sed -i '/^\s*version\s*:/d' "${COMPOSE_FILE}"
+  fi
+
+  dc -f "${COMPOSE_FILE}" config >/dev/null
   log "Pulling latest operator image..."; docker pull ghcr.io/drosera-network/drosera-operator:latest 2>&1 | tee_log "docker_pull.log"
 
   # Restart stack cleanly (avoid backoff loops holding bad env)
   log "Restarting operator stack..."
-  dc -f docker-compose.yaml down -v 2>&1 | tee_log "compose_down.log" || true
-  dc -f docker-compose.yaml up -d 2>&1 | tee_log "compose_up.log"
-  dc -f docker-compose.yaml ps
+  dc -f "${COMPOSE_FILE}" down -v 2>&1 | tee_log "compose_down.log" || true
+  dc -f "${COMPOSE_FILE}" up -d 2>&1 | tee_log "compose_up.log"
+  dc -f "${COMPOSE_FILE}" ps
 }
 
 register_and_optin_operator() {
@@ -506,7 +555,7 @@ EOF
   evm_from_pk="$(get_evm_address_from_pk "$pk")"; echo "PK-derived address: ${evm_from_pk}"
   if [[ "${evm_from_pk,,}" != "${owner_addr,,}" ]]; then echo "ERROR: Provided EVM address does not match the private key address."; return 1; fi
   ( cd "${TRAP_DIR}" && DROSERA_PRIVATE_KEY="$pk" bash -c 'echo "ofc" | drosera apply' ) 2>&1 | tee -a "${LOG_DIR}/apply.log"
-  [[ -f "${NET_DIR}/docker-compose.yaml" ]] && ( cd "${NET_DIR}" && dc up -d ) || echo "NOTE: ${NET_DIR}/docker-compose.yaml not found; skipping compose up."
+  [[ -f "${COMPOSE_FILE}" ]] && ( cd "${NET_DIR}" && dc up -d ) || echo "NOTE: ${COMPOSE_FILE} not found; skipping compose up."
   echo "Now follow Discord verification steps on Drosera server."
   echo "You can optionally check Responder status:"
   echo "cast call ${DRO_RESPONDER_CONTRACT} \"isResponder(address)(bool)\" ${owner_addr} --rpc-url https://ethereum-holesky-rpc.publicnode.com"
@@ -515,11 +564,11 @@ EOF
 
 view_logs() {
   echo "==== Docker Compose logs (follow; Ctrl-C to exit) ===="
-  if [[ -f "${NET_DIR}/docker-compose.yaml" ]]; then ( cd "${NET_DIR}" && dc logs -f --tail=200 ); else echo "Compose file not found at ${NET_DIR}/docker-compose.yaml"; fi
+  if [[ -f "${COMPOSE_FILE}" ]]; then ( cd "${NET_DIR}" && dc logs -f --tail=200 ); else echo "Compose file not found at ${COMPOSE_FILE}"; fi
 }
 
 restart_operators() {
-  [[ -f "${NET_DIR}/docker-compose.yaml" ]] || { echo "ERROR: docker-compose.yaml not found in ${NET_DIR}." >&2; exit 1; }
+  [[ -f "${COMPOSE_FILE}" ]] || { echo "ERROR: docker-compose.yaml not found in ${NET_DIR}." >&2; exit 1; }
   ( cd "${NET_DIR}" && dc down ) 2>&1 | tee -a "${LOG_DIR}/compose_down.log"
   ( cd "${NET_DIR}" && dc up -d ) 2>&1 | tee -a "${LOG_DIR}/compose_up.log"
   ( cd "${NET_DIR}" && dc logs --no-color ) > "${LOG_DIR}/compose_full.log" 2>&1 || true
@@ -559,7 +608,7 @@ menu() {
   while :; do
     print_header
     echo "Choose an option:"
-    echo " 1) Full install (AUTO-ready): Docker + Bun + Foundry + Drosera, init trap, apply, bloomboost, operator register & optin"
+    echo " 1) Full install (AUTO-ready): Docker + Bun + Foundry + Drosera, init trap, normalize config, apply, bloomboost, operator register & optin"
     echo " 2) View operator logs (docker compose logs -f)"
     echo " 3) Restart operator stack (compose down/up)"
     echo " 4) Upgrade Drosera & set relay RPC, then apply"
@@ -567,7 +616,7 @@ menu() {
     echo " 0) Exit"
     read -r -p "Select (0-5): " choice || true
     case "${choice:-}" in
-      1) install_deps; install_docker; install_bun; install_foundry; install_drosera_cli; post_install_env; init_trap_project; safe_edit_drosera_toml_whitelist; setup_operator_stack; register_and_optin_operator; if [[ $AUTO_MODE -ne 1 ]]; then read -r -p "Press Enter to return to menu..." _ ; fi ;;
+      1) install_deps; install_docker; install_bun; install_foundry; install_drosera_cli; post_install_env; init_trap_project; safe_edit_drosera_toml_whitelist_and_normalize; setup_operator_stack; register_and_optin_operator; if [[ $AUTO_MODE -ne 1 ]]; then read -r -p "Press Enter to return to menu..." _ ; fi ;;
       2) view_logs; read -r -p "Press Enter to return to menu..." _ ;;
       3) restart_operators; read -r -p "Press Enter to return to menu..." _ ;;
       4) upgrade_and_fix_relay; read -r -p "Press Enter to return to menu..." _ ;;
