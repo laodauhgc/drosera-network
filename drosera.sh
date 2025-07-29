@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 #
 # drosera.sh — Best-practice installer & operator helper for Drosera
-# Version: 1.0.0
-# Notes
-# - This script uses only standard tools available on modern Ubuntu LTS.
-# - Network endpoints / chain IDs / contract addresses are configurable below.
-# - You accept the risks of executing network installers such as curl | bash.
-#   Prefer pinning versions and verifying checksums if your environment requires it.
+# Version: 1.0.1 
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -16,8 +11,49 @@ IFS=$'\n\t'
 ############################################
 
 # --- Script metadata ---
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 SCRIPT_DATE="2025-07-30"
+
+# --- Flags / CLI options (global) ---
+FLAGS_PK=""
+FLAGS_PK_FILE=""
+NON_INTERACTIVE=0
+ASSUME_YES=0
+
+usage() {
+  cat <<USAGE
+Usage: $0 [options]
+
+Options:
+  --pk HEX                  Provide EVM private key (with or without 0x)
+  --pk-file PATH            Read EVM private key from file (first line used)
+  -n, --non-interactive     Do not prompt for input (fail if missing inputs)
+  -y, --yes                 Assume 'yes' to confirmations when possible
+  -h, --help                Show this help and exit
+
+You can also provide the key via environment variables:
+  DROSERA_PRIVATE_KEY=0x...  or  PK=0x...
+USAGE
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pk)
+        FLAGS_PK="${2:-}"; shift 2 || { echo "ERROR: --pk requires a value"; exit 1; } ;;
+      --pk-file)
+        FLAGS_PK_FILE="${2:-}"; shift 2 || { echo "ERROR: --pk-file requires a value"; exit 1; } ;;
+      -n|--non-interactive)
+        NON_INTERACTIVE=1; shift ;;
+      -y|--yes)
+        ASSUME_YES=1; shift ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        echo "Unknown option: $1"; usage; exit 1 ;;
+    esac
+  done
+}
 
 # --- Paths & dirs ---
 ROOT_DIR="/root"
@@ -39,15 +75,12 @@ dc() {
 }
 
 # --- Chain & contract defaults (override by exporting env before running) ---
-# Hoodi testnet / Holesky examples (you can change later or via .env)
 : "${DRO_CHAIN_ID:=560048}"
 : "${DRO_ETH_RPC_URL:=https://0xrpc.io/hoodi}"
 : "${DRO_ETH_RPC_URL_OPTIN:=https://ethereum-hoodi-rpc.publicnode.com}"
 : "${DRO_DROSERA_ADDRESS:=0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D}"
 : "${DRO_RESPONDER_CONTRACT:=0x183D78491555cb69B68d2354F7373cc2632508C7}"
 : "${DRO_RELAY_RPC:=https://relay.hoodi.drosera.io}"
-
-# --- Repo for operator compose (override if needed) ---
 : "${DRO_NETWORK_REPO:=https://github.com/laodauhgc/drosera-network.git}"
 
 # --- PATH management (add once) ---
@@ -75,21 +108,71 @@ require_root() {
 
 confirm() {
   local prompt="${1:-Are you sure?}"
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    return 0
+  fi
   read -r -p "${prompt} [y/N]: " ans || true
   [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
 }
 
+trim_hex_key() {
+  # Remove whitespace, newlines, carriage returns; strip 0x prefix
+  local x="$1"
+  x="${x//$'\r'/}"
+  x="${x//$'\n'/}"
+  # remove all spaces/tabs
+  x="${x//[[:space:]]/}"
+  x="${x#0x}"
+  echo -n "$x"
+}
+
 prompt_private_key() {
-  local pk
-  while :; do
-    read -r -s -p "Enter your EVM private key (64 hex, may start with 0x): " pk; echo
-    pk="${pk#0x}"
+  local pk raw
+  # First attempt: silent input (hidden)
+  if [[ -t 0 ]]; then
+    read -r -s -p "Enter your EVM private key (64 hex, may start with 0x): " raw || true
+    echo
+    pk="$(trim_hex_key "$raw")"
     if [[ "$pk" =~ ^[0-9a-fA-F]{64}$ ]]; then
-      echo "$pk"
-      return 0
+      echo "$pk"; return 0
     fi
-    echo "Invalid private key format. Try again."
-  done
+    echo "Input seems invalid. Paste again (visible, will be trimmed):"
+    read -r raw || true
+    pk="$(trim_hex_key "$raw")"
+    if [[ "$pk" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      echo "$pk"; return 0
+    fi
+  fi
+  echo "ERROR: Invalid private key format. Provide via env (DROSERA_PRIVATE_KEY/PK), flags (--pk/--pk-file), or interactive TTY." >&2
+  return 1
+}
+
+obtain_pk() {
+  # Precedence: env DROSERA_PRIVATE_KEY -> env PK -> --pk -> --pk-file -> (stdin if non-tty) -> prompt
+  local pk="${DROSERA_PRIVATE_KEY:-}"
+  if [[ -z "$pk" ]]; then pk="${PK:-}"; fi
+  if [[ -z "$pk" && -n "${FLAGS_PK:-}" ]]; then pk="$FLAGS_PK"; fi
+  if [[ -z "$pk" && -n "${FLAGS_PK_FILE:-}" && -f "$FLAGS_PK_FILE" ]]; then
+    # Use first non-empty line
+    pk="$(grep -m1 -E '.+' "$FLAGS_PK_FILE" || true)"
+  fi
+  if [[ -z "$pk" && ! -t 0 ]]; then
+    # Read from stdin (one line)
+    read -r pk || true
+  fi
+  if [[ -z "$pk" ]]; then
+    if [[ $NON_INTERACTIVE -eq 1 ]]; then
+      echo "ERROR: No private key provided in non-interactive mode." >&2
+      return 1
+    fi
+    pk="$(prompt_private_key)" || return 1
+  fi
+  pk="$(trim_hex_key "$pk")"
+  if [[ ! "$pk" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "ERROR: Provided private key is not 64 hex chars after normalization." >&2
+    return 1
+  fi
+  echo -n "$pk"
 }
 
 validate_evm_address() {
@@ -97,21 +180,26 @@ validate_evm_address() {
 }
 
 get_evm_address_from_pk() {
-  local pk="$1"
+  local pk="$(trim_hex_key "$1")"
   if ! command -v cast >/dev/null 2>&1; then
     echo "ERROR: 'cast' not found (Foundry not installed/loaded)." >&2
     return 1
   fi
-  if ! addr="$(cast wallet address --private-key "$pk" 2>/dev/null)"; then
-    echo "ERROR: Unable to compute address from private key." >&2
-    return 1
+  local out
+  # Try without 0x
+  if out="$(cast wallet address --private-key "$pk" 2>/dev/null)"; then
+    echo "$out"; return 0
   fi
-  echo "$addr"
+  # Try with 0x
+  if out="$(cast wallet address --private-key "0x$pk" 2>/dev/null)"; then
+    echo "$out"; return 0
+  fi
+  echo "ERROR: Unable to compute address from private key (tried with/without 0x). Check your key." >&2
+  return 1
 }
 
 net_check() {
   echo "Checking network connectivity..."
-  # Prefer HTTPS HEAD/GET checks over ICMP ping
   if curl -fsS --max-time 5 https://ifconfig.me >/dev/null 2>&1 || \
      curl -fsS --max-time 5 https://api.ipify.org >/dev/null 2>&1; then
     echo "Network OK."
@@ -135,13 +223,11 @@ sys_check() {
 }
 
 log() {
-  # Prepend timestamp and write to both stdout and logfile
   local msg="$*"
   echo "$(date +'%Y-%m-%dT%H:%M:%S%z')  ${msg}" | tee -a "${LOG_DIR}/drosera.log"
 }
 
 tee_log() {
-  # Use: some_command 2>&1 | tee_log file.log
   local f="${1}"
   tee -a "${LOG_DIR}/${f}"
 }
@@ -153,7 +239,6 @@ tee_log() {
 install_deps() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  # Keep --force-confold to avoid prompts on config files
   apt-get upgrade -y -o Dpkg::Options::="--force-confold"
   apt-get install -y \
     ca-certificates curl gnupg lsb-release software-properties-common \
@@ -187,7 +272,6 @@ install_docker() {
   systemctl enable docker
   systemctl start docker
 
-  # Fallback install for docker-compose v1 binary if user prefers (optional)
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
     log "Installing legacy docker-compose (v1) as fallback..."
     curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
@@ -234,7 +318,6 @@ install_drosera_cli() {
 post_install_env() {
   add_paths
   hash -r || true
-  # Prove installs
   forge --version   || { echo "forge missing"; exit 1; }
   cast --version    || { echo "cast missing"; exit 1; }
   drosera --version || { echo "drosera missing"; exit 1; }
@@ -268,17 +351,13 @@ safe_edit_drosera_toml_whitelist() {
   local toml="${TRAP_DIR}/drosera.toml"
   [[ -f "$toml" ]] || { echo "ERROR: ${toml} not found."; exit 1; }
 
-  # Get EVM address
   local pk addr
-  pk="$(prompt_private_key)"
+  pk="$(obtain_pk)" || exit 1
   addr="$(get_evm_address_from_pk "$pk")" || exit 1
   echo "Your EVM address: ${addr}"
 
-  # Backup once per run
   cp -f "$toml" "${toml}.bak.$(date +%s)"
 
-  # Insert or replace whitelist in the first [traps.*] section.
-  # This is heuristic but safer than global replace.
   awk -v addr="$addr" '
     BEGIN{intrap=0; done=0}
     /^\[traps\.[^]]+\]/ {intrap=1}
@@ -299,25 +378,21 @@ safe_edit_drosera_toml_whitelist() {
     }
   ' "$toml" > "${toml}.tmp" && mv "${toml}.tmp" "$toml"
 
-  # First-time apply; pass PK via env for the single command only
   echo "Running: drosera apply (first time)"
   ( cd "${TRAP_DIR}" && \
     DROSERA_PRIVATE_KEY="$pk" bash -c 'echo "ofc" | drosera apply' 2>&1 | tee -a "${LOG_DIR}/apply.log" )
 
-  # Try to extract trap address from logs
   local trap_address
-  trap_address="$(grep -oE 'trapAddress: 0x[a-fA-F0-9]{40}' "${LOG_DIR}/apply.log" | awk "{print \$2}" | tail -1 || true)"
+  trap_address="$(grep -oE 'trapAddress: 0x[a-fA-F0-9]{40}' "${LOG_DIR}/apply.log" | awk '{print $2}' | tail -1 || true)"
   if [[ -z "${trap_address:-}" ]]; then
     read -r -p "Unable to detect trapAddress from logs. Enter it manually (0x...): " trap_address
     validate_evm_address "$trap_address" || { echo "Invalid trap address."; exit 1; }
   fi
   echo "Trap address: $trap_address"
 
-  # Ask user for ETH top-up amount (bloomboost)
   local eth_amount
   while :; do
-    read -r -p "Enter ETH amount for bloomboost (e.g., 0.01): " eth_amount
-    # Basic numeric check
+    read -r -p "Enter ETH amount for bloomboost (e.g., 0.01): " eth_amount || true
     if [[ "$eth_amount" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       break
     fi
@@ -327,9 +402,6 @@ safe_edit_drosera_toml_whitelist() {
   echo "Funding Hoodi via bloomboost..."
   ( DROSERA_PRIVATE_KEY="$pk" drosera bloomboost --trap-address "$trap_address" --eth-amount "$eth_amount" ) \
     2>&1 | tee -a "${LOG_DIR}/bloomboost.log"
-
-  # Clear secret from memory (best effort)
-  unset pk
 }
 
 setup_operator_stack() {
@@ -347,7 +419,6 @@ setup_operator_stack() {
 
   cd "${NET_DIR}"
 
-  # Copy .env.example -> .env and secure permissions
   if [[ -f ".env.example" ]]; then
     cp .env.example .env
     chmod 600 .env
@@ -357,18 +428,15 @@ setup_operator_stack() {
     exit 1
   fi
 
-  # Fill .env (OPTIONAL: avoid storing key by default)
   local vps_ip
   vps_ip="$(curl -fsS ifconfig.me || curl -fsS ipinfo.io/ip || true)"
   if [[ -z "${vps_ip:-}" ]]; then
     read -r -p "Enter your public VPS IP: " vps_ip
   fi
 
-  # Write only VPS_IP; leave ETH_PRIVATE_KEY blank by default for security.
   sed -i "s|^VPS_IP=.*|VPS_IP=\"${vps_ip}\"|" .env
   echo "Wrote VPS_IP=${vps_ip} to .env (ETH_PRIVATE_KEY left blank for security)."
 
-  # Validate compose file then pull & run
   if [[ -f docker-compose.yaml ]]; then
     dc -f docker-compose.yaml config >/dev/null
     log "Pulling latest operator image..."
@@ -383,13 +451,11 @@ setup_operator_stack() {
 }
 
 register_and_optin_operator() {
-  local pk
-  pk="$(prompt_private_key)"
-  local addr
+  local pk addr
+  pk="$(obtain_pk)" || exit 1
   addr="$(get_evm_address_from_pk "$pk")" || exit 1
   echo "Using EVM address: ${addr}"
 
-  # Register operator via containerized CLI
   log "Registering Drosera Operator..."
   docker run --rm ghcr.io/drosera-network/drosera-operator:latest register \
     --eth-chain-id "${DRO_CHAIN_ID}" \
@@ -400,7 +466,6 @@ register_and_optin_operator() {
       echo "WARNING: Register command failed; check logs."
     }
 
-  # Need trap address to opt-in
   local trap_address
   read -r -p "Enter trap address to opt-in (0x...): " trap_address
   validate_evm_address "$trap_address" || { echo "Invalid trap address."; exit 1; }
@@ -413,12 +478,9 @@ register_and_optin_operator() {
     2>&1 | tee -a "${LOG_DIR}/operator_optin.log" || {
       echo "WARNING: Optin command failed; you can try from Drosera dashboard."
     }
-
-  unset pk
 }
 
 upgrade_and_fix_relay() {
-  # Reinstall/upgrade drosera and set relay RPC, then apply
   install_drosera_cli
   add_paths
   hash -r || true
@@ -437,15 +499,11 @@ upgrade_and_fix_relay() {
     echo "drosera_rpc = \"${DRO_RELAY_RPC}\"" >> "$toml"
   fi
 
-  # Apply with a fresh PK prompt
   local pk
-  pk="$(prompt_private_key)"
+  pk="$(obtain_pk)" || exit 1
   echo "Applying drosera with relay RPC: ${DRO_RELAY_RPC}"
   ( cd "${TRAP_DIR}" && \
     DROSERA_PRIVATE_KEY="$pk" bash -c 'sleep 20; echo "ofc" | drosera apply' 2>&1 | tee -a "${LOG_DIR}/apply.log" )
-  unset pk
-
-  echo "Upgrade + relay fix completed."
 }
 
 claim_cadet_role() {
@@ -468,7 +526,6 @@ claim_cadet_role() {
     [[ -n "${discord_name}" ]] && break || echo "Discord name must not be empty."
   done
 
-  # Write Trap.sol
   cat > "${TRAP_DIR}/src/Trap.sol" <<EOF
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -500,35 +557,29 @@ EOF
 
   echo "Updated ${TRAP_DIR}/src/Trap.sol with your Discord name."
 
-  # Update drosera.toml
   local toml="${TRAP_DIR}/drosera.toml"
   [[ -f "$toml" ]] || { echo "ERROR: ${toml} not found."; exit 1; }
   cp -f "$toml" "${toml}.bak.$(date +%s)"
 
-  # path
   if grep -q '^path[[:space:]]*=' "$toml"; then
     sed -i 's|^path[[:space:]]*=.*|path = "out/Trap.sol/Trap.json"|' "$toml"
   else
     echo 'path = "out/Trap.sol/Trap.json"' >> "$toml"
   fi
-  # response contract
   if grep -q '^response_contract[[:space:]]*=' "$toml"; then
     sed -i "s|^response_contract[[:space:]]*=.*|response_contract = \"${DRO_RESPONDER_CONTRACT}\"|" "$toml"
   else
     echo "response_contract = \"${DRO_RESPONDER_CONTRACT}\"" >> "$toml"
   fi
-  # response function
   if grep -q '^response_function[[:space:]]*=' "$toml"; then
     sed -i 's|^response_function[[:space:]]*=.*|response_function = "respondWithDiscordName(string)"|' "$toml"
   else
     echo 'response_function = "respondWithDiscordName(string)"' >> "$toml"
   fi
 
-  # Build
   ( cd "${TRAP_DIR}" && forge build ) 2>&1 | tee -a "${LOG_DIR}/forge_build.log"
 
-  # Apply with PK and verify address consistency
-  pk="$(prompt_private_key)"
+  pk="$(obtain_pk)" || exit 1
   evm_from_pk="$(get_evm_address_from_pk "$pk")"
   echo "PK-derived address: ${evm_from_pk}"
   if [[ "${evm_from_pk,,}" != "${owner_addr,,}" ]]; then
@@ -540,26 +591,21 @@ EOF
     DROSERA_PRIVATE_KEY="$pk" bash -c 'echo "ofc" | drosera apply' ) \
     2>&1 | tee -a "${LOG_DIR}/apply.log"
 
-  # Start compose stack if present
   if [[ -f "${NET_DIR}/docker-compose.yaml" ]]; then
     ( cd "${NET_DIR}" && dc up -d )
   else
     echo "NOTE: ${NET_DIR}/docker-compose.yaml not found; skipping compose up."
   fi
 
-  # Optional: onchain verification hints
   echo "Now follow Discord verification steps on Drosera server."
   echo "You can optionally check Responder status:"
   echo "cast call ${DRO_RESPONDER_CONTRACT} \"isResponder(address)(bool)\" ${owner_addr} --rpc-url https://ethereum-holesky-rpc.publicnode.com"
 
-  # Try fetch discord names (non-fatal)
   if command -v cast >/dev/null 2>&1; then
     echo "Fetching discord names (best effort)..."
     cast call "${DRO_RESPONDER_CONTRACT}" "getDiscordNamesBatch(uint256,uint256)(string[])" 0 2000 \
       --rpc-url https://ethereum-holesky-rpc.publicnode.com/ 2>/dev/null || true
   fi
-
-  unset pk
 }
 
 view_logs() {
@@ -595,13 +641,18 @@ Drosera Helper Script  v${SCRIPT_VERSION}  (${SCRIPT_DATE})
 ================================================================
 This script will help you install, configure, and operate Drosera.
 - Works best on Ubuntu (LTS). Run as root.
-- Secrets are handled via hidden input and one-shot environment usage.
+- Secrets can be provided interactively, via env, or via flags.
 - Override defaults by exporting env vars before running.
 
 Base directories:
 - Trap project: ${TRAP_DIR}
 - Operator repo: ${NET_DIR}
 - Logs: ${LOG_DIR}
+
+You may run with flags, e.g.:
+  sudo -E bash $0 --pk 0xYOUR_HEX_KEY
+  sudo -E bash $0 --pk-file /root/pk.txt
+  DROSERA_PRIVATE_KEY=0xYOUR_HEX_KEY sudo -E bash $0
 
 EOH
 }
@@ -658,8 +709,9 @@ menu() {
 }
 
 main() {
+  parse_args "$@"
   print_header
   menu
 }
 
-main
+main "$@"
