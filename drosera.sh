@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
+# Drosera AIO Installer (robust) - v1.4.3
+# - Fix 429 rate limit on CLI install (retry & verify 'apply')
+# - Fix PS1 unbound in non-interactive shells
+# - Re-init trap project if drosera.toml missing (backup + template)
+# - Safe operator register/opt-in flows
+# - Verbose logs in /var/log/drosera
+
 set -Eeuo pipefail
 
-# =========================================
-#  Drosera One-Click (aligned with original)
-#  v1.3.2 (fix re-init trap when missing drosera.toml)
-# =========================================
+# -------- Safe defaults for non-interactive shells --------
+: "${PS1:=# }"  # avoid "PS1: unbound variable" from scripts that source ~/.bashrc
 
-# ---- PATH (giữ như script gốc; KHÔNG source .bashrc trong non-interactive) ----
+# -------- PATH like original sample --------
 export PATH="$PATH:/root/.drosera/bin:/root/.bun/bin:/root/.foundry/bin"
 
-# ---- Config mặc định ----
+# -------- Globals --------
 TRAP_DIR="${TRAP_DIR:-/root/my-drosera-trap}"
 NET_DIR="${NET_DIR:-/root/drosera-network}"
 ENV_FILE="$NET_DIR/.env"
+
 LOG_DIR="/var/log/drosera"; mkdir -p "$LOG_DIR"
+INSTALL_LOG="$LOG_DIR/install.log"
 APPLY_LOG="$LOG_DIR/apply.log"
 OPTIN_LOG="$LOG_DIR/optin.log"
 REG_LOG="$LOG_DIR/register.log"
-INSTALL_LOG="$LOG_DIR/install.log"
 TRAP_SCAN_LOG="$LOG_DIR/trap_scan.log"
 
 TEMPLATE_REPO="${TEMPLATE_REPO:-drosera-network/trap-foundry-template}"
@@ -26,16 +32,15 @@ OP_IMAGE="${OP_IMAGE:-ghcr.io/drosera-network/drosera-operator:v1.20.0}"
 P2P_TCP="${P2P_TCP:-31313}"
 P2P_UDP="${P2P_UDP:-31313}"
 
-ETH_CHAIN_ID="${ETH_CHAIN_ID:-}"     # ví dụ 560048
-ETH_RPC_URL="${ETH_RPC_URL:-}"       # ví dụ https://0xrpc.io/hoodi
-DROSERA_ADDR="${DROSERA_ADDR:-}"     # ví dụ 0x91cB447BaF...
+ETH_CHAIN_ID="${ETH_CHAIN_ID:-}"     # ví dụ 560048 (tùy mạng)
+ETH_RPC_URL="${ETH_RPC_URL:-}"       # ví dụ https://0xrpc.io/hoodi (tùy mạng)
+DROSERA_ADDR="${DROSERA_ADDR:-}"     # ví dụ 0x91cB447BaF... (tùy mạng)
 
-DO_BLOOMBOOST="${DO_BLOOMBOOST:-0}"
-BLOOM_ETH_AMT="${BLOOM_ETH_AMT:-}"
+RUN_OPTIN=1     # --no-optin sẽ tắt
+DO_BLOOMBOOST=0 # --bloom <eth> để bật
+BLOOM_ETH_AMT=""
 
-AUTO=0
-RUN_OPTIN=1
-
+# -------- Utils --------
 ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
 ok(){ echo -e "$(ts)  $*"; }
 warn(){ echo -e "$(ts)  \e[33mWARNING:\e[0m $*"; }
@@ -50,21 +55,20 @@ Usage:
 
 Options:
   --pk <hex>       Private key (64 hex, có/không '0x').
-  --auto           Chạy full tự động (install + trap + apply + [.env] + operator + register + opt-in).
+  --auto           Chạy toàn bộ tự động (install + trap + apply + operator + register + opt-in).
   --no-optin       Bỏ qua opt-in operator vào trap.
-  --bloom <eth>    drosera bloomboost với số ETH (vd: 0.01).
-  --image <ref>    Đổi operator image (mặc định: $OP_IMAGE).
+  --bloom <eth>    drosera bloomboost sau khi apply, ví dụ: --bloom 0.01
+  --image <ref>    Đổi operator image (mặc định: $OP_IMAGE)
   --help           Trợ giúp.
 
-ENV hữu ích:
-  TEMPLATE_REPO=drosera-network/trap-foundry-template
-  NET_DIR=/root/drosera-network
-  ETH_CHAIN_ID=...   ETH_RPC_URL=...   DROSERA_ADDR=...
+ENV bổ sung (tùy mạng):
+  TEMPLATE_REPO, NET_DIR, ETH_CHAIN_ID, ETH_RPC_URL, DROSERA_ADDR, P2P_TCP, P2P_UDP
 USAGE
 }
 
-# ---- Parse args ----
+# -------- Parse args --------
 PK_HEX=""
+AUTO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pk) PK_HEX="${2:-}"; shift 2;;
@@ -91,23 +95,22 @@ get_public_ip(){
   local ip=""
   ip="$(curl -4fsSL https://api.ipify.org || true)"
   [[ -z "$ip" ]] && ip="$(curl -4fsSL ifconfig.me || true)"
+  # dig cần dnsutils
   [[ -z "$ip" ]] && ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null || true)"
   echo -n "$ip"
 }
 
 sanitize_pk(){
-  local pk="$1"
-  pk="${pk#0x}"
+  local pk="$1"; pk="${pk#0x}"
   if [[ ! "$pk" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    err "Private key không đúng định dạng 64 hex."
-    exit 1
+    err "Private key không đúng định dạng 64 hex."; exit 1
   fi
   echo -n "$pk"
 }
 
 ensure_deps(){
   ok "Updating apt & installing base packages..."
-  apt_install curl ca-certificates gnupg lsb-release jq git unzip make build-essential pkg-config libssl-dev clang cmake
+  apt_install curl ca-certificates gnupg lsb-release jq git unzip make build-essential pkg-config libssl-dev clang cmake dnsutils
 }
 
 ensure_docker(){
@@ -170,6 +173,7 @@ ensure_drosera_cli(){
       local rc=$?
       set -e
       if [[ $rc -eq 0 && -s "$tmp" ]]; then
+        # Một số installer có thể source ~/.bashrc -> đã set PS1 ở đầu file để tránh lỗi.
         bash "$tmp" >>"$INSTALL_LOG" 2>&1 || true
         break
       fi
@@ -198,7 +202,7 @@ ensure_drosera_cli(){
     warn "Drosera CLI chưa có 'apply'. Thử droseraup..."
     command -v droseraup >/dev/null 2>&1 && droseraup >>"$INSTALL_LOG" 2>&1 || true
     if ! drosera --help 2>&1 | grep -qE '\bapply\b'; then
-      err "Drosera CLI vẫn thiếu 'apply'. Hãy chạy lại sau khi hết rate-limit."; exit 1
+      err "Drosera CLI vẫn thiếu 'apply' (có thể do rate-limit 429). Hãy chạy lại sau vài phút."; exit 1
     fi
   fi
 }
@@ -209,11 +213,10 @@ evm_address_from_pk(){
   echo -n "$addr"
 }
 
-# ====== FIX: Re-init trap khi thiếu drosera.toml ======
+# ---- Re-init trap khi thiếu drosera.toml ----
 init_trap_project(){
   ok "Preparing trap project at $TRAP_DIR ..."
   local need_reinit=0
-
   if [[ ! -d "$TRAP_DIR" ]]; then
     need_reinit=1
   elif [[ ! -f "$TRAP_DIR/drosera.toml" ]]; then
@@ -227,7 +230,6 @@ init_trap_project(){
       mv "$TRAP_DIR" "$bak"
     fi
     rm -rf "$TRAP_DIR"
-    # Try forge init template
     if forge init -t "$TEMPLATE_REPO" "$TRAP_DIR" >>"$INSTALL_LOG" 2>&1; then
       ok "Initialized trap from template ($TEMPLATE_REPO)."
     else
@@ -237,7 +239,7 @@ init_trap_project(){
   fi
 
   if [[ ! -f "$TRAP_DIR/drosera.toml" ]]; then
-    err "Vẫn không tìm thấy drosera.toml sau khi re-init. Xem $INSTALL_LOG"; exit 1
+    err "Không tìm thấy drosera.toml sau khi re-init. Xem $INSTALL_LOG"; exit 1
   fi
 
   pushd "$TRAP_DIR" >/dev/null
@@ -269,7 +271,7 @@ ensure_whitelist(){
 run_apply_and_get_trap(){
   : >"$APPLY_LOG"
   pushd "$TRAP_DIR" >/dev/null
-  export DROSERA_PRIVATE_KEY="$1"   # không 0x
+  export DROSERA_PRIVATE_KEY="$1"   # (không 0x)
   ok 'Running: echo "ofc" | drosera apply'
   if echo "ofc" | drosera apply >>"$APPLY_LOG" 2>&1; then
     ok "drosera apply completed."
@@ -301,15 +303,15 @@ maybe_bloomboost(){
   popd >/dev/null
 }
 
-prepare_network_repo(){
+prepare_network_repo_and_env(){
+  mkdir -p "$NET_DIR"
   if [[ ! -d "$NET_DIR/.git" ]]; then
     ok "Cloning drosera-network repo..."
     git clone https://github.com/laodauhgc/drosera-network.git "$NET_DIR" >>"$INSTALL_LOG" 2>&1 || true
   fi
-  mkdir -p "$NET_DIR"
+
   local ip; ip="$(get_public_ip)"
   [[ -z "$ip" ]] && { warn "Không lấy được public IP."; ip="0.0.0.0"; }
-
   local udp_maddr="/ip4/${ip}/udp/${P2P_UDP}/quic-v1"
   local tcp_maddr="/ip4/${ip}/tcp/${P2P_TCP}"
 
@@ -356,6 +358,7 @@ reset_and_run_operator(){
     --env-file "$ENV_FILE" \
     "$OP_IMAGE" >/dev/null
 
+  # chờ sẵn sàng tối đa ~3 phút
   for i in {1..36}; do
     if docker logs --since=20s drosera-operator 2>/dev/null | grep -q 'Operator Node successfully spawned'; then
       ok "Operator Node successfully spawned."
@@ -387,7 +390,7 @@ register_operator(){
       ok "Operator already registered. Skip."
       return 0
     fi
-    warn "Register error, retrying..."
+    warn "Register error, retrying in 10s..."
     sleep 10
     set +e
     docker exec drosera-operator /bin/sh -lc 'drosera-operator register' >>"$REG_LOG" 2>&1
@@ -437,6 +440,9 @@ optin_operator(){
 
 main(){
   ok "Starting..."
+  [[ -z "${PK_HEX:-}" ]] && { err "Thiếu --pk <hex>."; exit 2; }
+  PK_HEX="$(sanitize_pk "$PK_HEX")"
+
   ensure_deps
   ensure_docker
   ensure_compose
@@ -444,18 +450,13 @@ main(){
   ensure_foundry
   ensure_drosera_cli
 
-  if [[ -z "$PK_HEX" ]]; then
-    err "Thiếu --pk <hex>."; exit 2
-  fi
-  PK_HEX="$(sanitize_pk "$PK_HEX")"
-
   local EVM_ADDR; EVM_ADDR="$(evm_address_from_pk "$PK_HEX")"
   if [[ ! "$EVM_ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     err "Không lấy được EVM address từ private key."; exit 1
   fi
   ok "EVM address: $EVM_ADDR"
 
-  init_trap_project                    # <— đã vá re-init khi thiếu drosera.toml
+  init_trap_project
   ensure_whitelist "$EVM_ADDR"
 
   local trap; trap="$(run_apply_and_get_trap "$PK_HEX")"
@@ -469,7 +470,7 @@ main(){
     maybe_bloomboost "$trap" "$PK_HEX"
   fi
 
-  prepare_network_repo
+  prepare_network_repo_and_env
   reset_and_run_operator
   register_operator
   if [[ -n "${trap:-}" ]]; then
