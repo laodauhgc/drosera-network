@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Drosera AIO Installer (robust) - v1.4.7
+# Drosera AIO Installer (robust) - v1.5.1
 set -Eeuo pipefail
-
 : "${PS1:=# }"
+
 export PATH="$PATH:/root/.drosera/bin:/root/.bun/bin:/root/.foundry/bin"
 
 TRAP_DIR="${TRAP_DIR:-/root/my-drosera-trap}"
@@ -18,12 +18,13 @@ TRAP_SCAN_LOG="$LOG_DIR/trap_scan.log"
 
 TEMPLATE_REPO="${TEMPLATE_REPO:-drosera-network/trap-foundry-template}"
 OP_IMAGE="${OP_IMAGE:-ghcr.io/drosera-network/drosera-operator:v1.20.0}"
+DEFAULT_RPC_URL="${DEFAULT_RPC_URL:-https://0xrpc.io/hoodi}"
 
 P2P_TCP="${P2P_TCP:-31313}"
 P2P_UDP="${P2P_UDP:-31313}"
 
 ETH_CHAIN_ID="${ETH_CHAIN_ID:-}"
-ETH_RPC_URL="${ETH_RPC_URL:-}"
+ETH_RPC_URL="${ETH_RPC_URL:-}"     # dùng nếu bạn muốn ép register/optin dùng RPC riêng
 DROSERA_ADDR="${DROSERA_ADDR:-}"
 
 RUN_OPTIN=1
@@ -36,8 +37,7 @@ warn(){ echo -e "$(ts)  \e[33mWARNING:\e[0m $*"; }
 err(){ echo -e "$(ts)  \e[31mERROR:\e[0m $*"; }
 require_root(){ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then err "Hãy chạy bằng root."; exit 1; fi; }
 
-usage(){
-  cat <<USAGE
+usage(){ cat <<USAGE
 Usage:
   $0 --pk <hex> [--auto] [--no-optin] [--bloom <eth>] [--image <ref>]
 USAGE
@@ -134,9 +134,7 @@ ensure_whitelist(){
       /^\[traps\.mytrap\]/{print; getline; print "whitelist = [\"" addr "\"]"; done=1}
       END{if(!done) print "whitelist = [\"" addr "\"]"}
     ' "$toml" > "${toml}.tmp" && mv "${toml}.tmp" "$toml"
-  else
-    echo "whitelist = [\"$addr\"]" >> "$toml"
-  fi
+  else echo "whitelist = [\"$addr\"]" >> "$toml"; fi
   ok "Wrote whitelist = [$addr] to drosera.toml"
 }
 
@@ -146,10 +144,11 @@ run_apply_and_get_trap(){
   export DROSERA_PRIVATE_KEY="$1"
   ok 'Running: echo "ofc" | drosera apply'
   if ! echo "ofc" | drosera apply >>"$APPLY_LOG" 2>&1; then err "drosera apply thất bại. Xem $APPLY_LOG"; popd >/dev/null; exit 1; fi
-  # Tìm đúng 1 địa chỉ 0x... cuối cùng và strip newline
+  # Lọc đúng 1 địa chỉ 0x...
   local trap=""
-  [[ -f "$TRAP_DIR/drosera.log" ]] && trap="$(grep -oE 'trapAddress: 0x[a-fA-F0-9]{40}' "$TRAP_DIR/drosera.log" | awk '{print $2}' | tail -1 || true)"
-  [[ -z "$trap" ]] && trap="$(grep -oE '0x[a-fA-F0-9]{40}' "$APPLY_LOG" | tail -1 | tr -d '\r\n' || true)"
+  [[ -f "$TRAP_DIR/drosera.log" ]] && trap="$(grep -aoE '0x[a-fA-F0-9]{40}' "$TRAP_DIR/drosera.log" | tail -1 || true)"
+  [[ -z "$trap" ]] && trap="$(grep -aoE '0x[a-fA-F0-9]{40}' "$APPLY_LOG" | tail -1 || true)"
+  trap="$(echo -n "$trap" | tr -d '\r\n' )"
   echo -n "$trap" > "$TRAP_SCAN_LOG"
   popd >/dev/null
   echo -n "$trap"
@@ -162,11 +161,24 @@ prepare_network_repo_and_env(){
   local udp_maddr="/ip4/${ip}/udp/${P2P_UDP}/quic-v1"
   local tcp_maddr="/ip4/${ip}/tcp/${P2P_TCP}"
   touch "$ENV_FILE"
+  # ETH_PRIVATE_KEY
   grep -q '^ETH_PRIVATE_KEY=' "$ENV_FILE" && sed -i 's|^ETH_PRIVATE_KEY=.*|ETH_PRIVATE_KEY=0x'"$PK_HEX"'|' "$ENV_FILE" || echo "ETH_PRIVATE_KEY=0x$PK_HEX" >> "$ENV_FILE"
-  grep -q '^VPS_IP=' "$ENV_FILE" && sed -i 's|^VPS_IP=.*|VPS_IP='"$ip"'|' "$ENV_FILE" || echo "VPS_IP=$ip" >> "$ENV_FILE"
-  grep -q '^EXTERNAL_P2P_MADDR=' "$ENV_FILE" && sed -i 's|^EXTERNAL_P2P_MADDR=.*|EXTERNAL_P2P_MADDR='"$udp_maddr"'|' "$ENV_FILE" || echo "EXTERNAL_P2P_MADDR=$udp_maddr" >> "$ENV_FILE"
-  grep -q '^EXTERNAL_P2P_TCP_MADDR=' "$ENV_FILE" && sed -i 's|^EXTERNAL_P2P_TCP_MADDR=.*|EXTERNAL_P2P_TCP_MADDR='"$tcp_maddr"'|' "$ENV_FILE" || echo "EXTERNAL_P2P_TCP_MADDR=$tcp_maddr" >> "$ENV_FILE"
-  ok "Wrote .env with PK and P2P addrs at $ENV_FILE"
+  # P2P (đa dạng biến cho compatibility)
+  for k in VPS_IP EXTERNAL_P2P_MADDR EXTERNAL_P2P_TCP_MADDR EXTERNAL_P2P_ADDRESS EXTERNAL_P2P_TCP_ADDRESS; do
+    case "$k" in
+      VPS_IP) val="$ip";;
+      EXTERNAL_P2P_MADDR|EXTERNAL_P2P_ADDRESS) val="$udp_maddr";;
+      EXTERNAL_P2P_TCP_MADDR|EXTERNAL_P2P_TCP_ADDRESS) val="$tcp_maddr";;
+    esac
+    if grep -q "^$k=" "$ENV_FILE"; then sed -i "s|^$k=.*|$k=$val|" "$ENV_FILE"; else echo "$k=$val" >> "$ENV_FILE"; fi
+  done
+  # RPC_URL (bắt buộc cho node settings)
+  if grep -q '^RPC_URL=' "$ENV_FILE"; then
+    sed -i "s|^RPC_URL=.*|RPC_URL=$DEFAULT_RPC_URL|" "$ENV_FILE"
+  else
+    echo "RPC_URL=$DEFAULT_RPC_URL" >> "$ENV_FILE"
+  fi
+  ok "Wrote .env with PK/RPC/P2P at $ENV_FILE"
 }
 
 start_operator_node(){
@@ -179,7 +191,6 @@ start_operator_node(){
   docker pull "$OP_IMAGE" >>"$INSTALL_LOG" 2>&1 || true
 
   ok "Starting operator (node)..."
-  # Mount drosera.toml vào /data và chạy subcommand `node` + chỉ định config:
   docker run -d \
     --name drosera-operator \
     --restart unless-stopped \
@@ -188,15 +199,16 @@ start_operator_node(){
     -v drosera-network_drosera_data:/data \
     -v "$TRAP_DIR/drosera.toml":/data/drosera.toml:ro \
     --env-file "$ENV_FILE" \
+    -e RPC_URL="$(grep ^RPC_URL= "$ENV_FILE" | cut -d= -f2-)" \
+    -e EXTERNAL_P2P_ADDRESS="$(grep ^EXTERNAL_P2P_ADDRESS= "$ENV_FILE" | cut -d= -f2-)" \
+    -e EXTERNAL_P2P_TCP_ADDRESS="$(grep ^EXTERNAL_P2P_TCP_ADDRESS= "$ENV_FILE" | cut -d= -f2-)" \
     "$OP_IMAGE" -c /data/drosera.toml node >/dev/null
 
   # Chờ tối đa ~3 phút
   local ok_spawn=0
   for i in {1..36}; do
-    if docker logs --since=20s drosera-operator 2>/dev/null | grep -q 'Operator Node successfully spawned'; then
-      ok_spawn=1; break
-    fi
-    # Nếu thấy "Usage:" nghĩa là đang chạy thiếu subcommand -> restart lại cho chắc
+    if docker logs --since=20s drosera-operator 2>/dev/null | grep -q 'Operator Node successfully spawned'; then ok_spawn=1; break; fi
+    # Nếu help/Usage -> restart lại đúng lệnh
     if docker logs --since=5s drosera-operator 2>/dev/null | grep -q '^Usage: drosera-operator'; then
       warn "Container in 'Usage' state -> restarting with explicit node..."
       docker rm -f drosera-operator >/dev/null 2>&1 || true
@@ -208,15 +220,14 @@ start_operator_node(){
         -v drosera-network_drosera_data:/data \
         -v "$TRAP_DIR/drosera.toml":/data/drosera.toml:ro \
         --env-file "$ENV_FILE" \
+        -e RPC_URL="$(grep ^RPC_URL= "$ENV_FILE" | cut -d= -f2-)" \
+        -e EXTERNAL_P2P_ADDRESS="$(grep ^EXTERNAL_P2P_ADDRESS= "$ENV_FILE" | cut -d= -f2-)" \
+        -e EXTERNAL_P2P_TCP_ADDRESS="$(grep ^EXTERNAL_P2P_TCP_ADDRESS= "$ENV_FILE" | cut -d= -f2-)" \
         "$OP_IMAGE" -c /data/drosera.toml node >/dev/null
     fi
     sleep 5
   done
-  if [[ $ok_spawn -eq 1 ]]; then
-    ok "Operator Node successfully spawned."
-  else
-    warn "Operator chưa in 'successfully spawned' sau 180s. Tiếp tục các bước sau."
-  fi
+  if [[ $ok_spawn -eq 1 ]]; then ok "Operator Node successfully spawned."; else warn "Operator chưa in 'successfully spawned' sau 180s. Tiếp tục các bước sau."; fi
 }
 
 register_operator(){
