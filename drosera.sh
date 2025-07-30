@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v1.9.1 – 30-Jul-2025 (SGT)
-# - Robust non-interactive bloomboost (auto-yes or expect TTY)
-# - Proper private key passing for operator (env DRO__ETH__PRIVATE_KEY + optional --eth-private-key)
-# - Compose V2 cleanup (no 'version'); bugfixes (endif->fi, stray paren)
-# - Binary discovery & PATH fixes for drosera/cast; idempotent state/summary
+# Drosera One-shot Installer v1.9.2 – 30-Jul-2025 (SGT)
+# - Install droseraup via GitHub Raw (fix 403), then droseraup installs drosera CLI/operator
+# - Non-interactive bloomboost (auto-yes or expect TTY)
+# - Proper PK passing (env DRO__ETH__PRIVATE_KEY + optional --eth-private-key)
+# - Compose V2 cleanup (no 'version'); PATH discovery & idempotent state/summary
 # - Public IPv4 enforcement; full logs and retries
 
 set -Eeuo pipefail
@@ -186,44 +186,47 @@ msg "Cài Foundry..."; curl -fsSL https://foundry.paradigm.xyz | bash; add_path_
 CAST_BIN="$(command -v cast || true)"; [[ -x "${CAST_BIN:-}" ]] || CAST_BIN="/root/.foundry/bin/cast"
 forge --version || true; "$CAST_BIN" --version || true
 
-# ----- Drosera CLI (robust) -----
+# ----- Install droseraup from GitHub Raw (fix 403) -----
 install_drosera_cli() {
-  msg "Cài Drosera CLI (robust)..."
+  msg "Cài droseraup từ GitHub Raw..."
   local tmp="/tmp/drosera_install_$$.sh"
-  local urls=(
-    "https://app.drosera.io/install"
-    # Bạn có thể thêm mirrors cá nhân tại đây (bỏ comment các dòng dưới nếu đã host sẵn):
-    # "https://raw.githubusercontent.com/laodauhgc/drosera-network/main/scripts/drosera-install.sh"
-    # "https://raw.githubusercontent.com/sdohuajia/Drosera-Network/main/scripts/drosera-install.sh"
-  )
-  local ok=""
-  for u in "${urls[@]}"; do
-    msg "Tải installer: $u"
-    local code
-    code=$(curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' \
-      --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
-      -w '%{http_code}' -fsSL "$u" -o "$tmp" || true)
-    if [[ "$code" == "200" ]] && grep -Eq 'droseraup|DROSERA' "$tmp"; then
-      bash "$tmp" && ok="1" && break
-    else
-      warn "Tải hoặc chạy installer thất bại (HTTP $code). Thử mirror khác..."
-    fi
-  done
-  rm -f "$tmp" 2>/dev/null || true
+  local url_installer="https://raw.githubusercontent.com/drosera-network/releases/main/droseraup/install"
 
-  if [[ -n "$ok" ]]; then
-    add_path_once 'export PATH=$PATH:/root/.drosera/bin'
-    if command -v droseraup >/dev/null 2>&1; then
-      droseraup || true
-    elif [[ -x "/root/.drosera/bin/droseraup" ]]; then
-      "/root/.drosera/bin/droseraup" || true
-    fi
+  # Tải installer (retry + UA)
+  local code
+  code=$(curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' \
+    --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
+    -w '%{http_code}' -fsSL "$url_installer" -o "$tmp" || true)
+  if [[ "$code" != "200" ]]; then
+    warn "Tải installer thất bại (HTTP $code). Kiểm tra kết nối tới GitHub Raw."
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
   fi
 
+  # Chạy installer: nó sẽ tải droseraup binary về ~/.drosera/bin/droseraup
+  bash "$tmp"
+  local rc=$?
+  rm -f "$tmp" 2>/dev/null || true
+  if [[ $rc -ne 0 ]]; then
+    warn "Installer chạy lỗi (rc=$rc)."
+    return 1
+  fi
+
+  # Thêm PATH hiện tại cho phiên làm việc này
+  add_path_once 'export PATH=$PATH:/root/.drosera/bin'
+
+  # Chạy droseraup để cài drosera & drosera-operator
+  if command -v droseraup >/dev/null 2>&1; then
+    droseraup || true
+  elif [[ -x "/root/.drosera/bin/droseraup" ]]; then
+    "/root/.drosera/bin/droseraup" || true
+  fi
+
+  # Tìm drosera binary
   DROSERA_BIN="$(command -v drosera || true)"
   [[ -x "${DROSERA_BIN:-}" ]] || DROSERA_BIN="/root/.drosera/bin/drosera"
   if [[ ! -x "$DROSERA_BIN" ]]; then
-    warn "Không tìm thấy drosera CLI sau khi thử cài đặt. Sẽ bỏ qua bước bloomboost và yêu cầu --trap để tiếp tục."
+    warn "Không tìm thấy drosera CLI sau khi cài. Sẽ bỏ qua bloomboost và yêu cầu --trap để tiếp tục."
     return 1
   fi
 
@@ -243,7 +246,7 @@ PK_HEX="0x${PK_RAW#0x}"
 if [[ -x "$CAST_BIN" ]]; then
   ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX")
 else
-  echo "Thiếu 'cast' (Foundry). Không thể suy địa chỉ ví. Hãy đảm bảo foundry đã cài." >&2
+  echo "Thiếu 'cast' (Foundry). Không thể suy địa chỉ ví." >&2
   exit 1
 fi
 msg "Địa chỉ ví: $ADDR"
