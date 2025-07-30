@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v1.9.2 – 30-Jul-2025 (SGT)
-# - Install droseraup via GitHub Raw (fix 403), then droseraup installs drosera CLI/operator
-# - Non-interactive bloomboost (auto-yes or expect TTY)
-# - Proper PK passing (env DRO__ETH__PRIVATE_KEY + optional --eth-private-key)
-# - Compose V2 cleanup (no 'version'); PATH discovery & idempotent state/summary
-# - Public IPv4 enforcement; full logs and retries
+# Drosera One-shot Installer v1.9.3 – 30-Jul-2025 (SGT)
+# - Fix: drosera apply "Failed to parse private key" by trying 0x / no-0x, env + flag
+# - Safe logging for apply (no pipe, no ERR trap interference)
+# - Install droseraup via GitHub Raw (fix 403); non-interactive bloomboost
+# - Proper PK passing for operator; Compose V2 cleanup; IPv4; state/summary
 
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -106,9 +105,7 @@ wait_code_deployed(){
     sleep 5
   done
 }
-last_nonzero_address_from(){
-  grep -ahoE '0x[a-fA-F0-9]{40}' "$@" 2>/dev/null | awk '{print tolower($0)}' | awk '!/^0x0{40}$/' | tail -n1
-}
+last_nonzero_address_from(){ grep -ahoE '0x[a-fA-F0-9]{40}' "$@" 2>/dev/null | awk '{print tolower($0)}' | awk '!/^0x0{40}$/' | tail -n1; }
 extract_trap_address(){
   local addr=""
   addr=$(awk '/Created Trap Config/{f=1} f && /- address:/{print $3}' drosera_apply.log 2>/dev/null | tail -n1 | tr 'A-Z' 'a-z') || true
@@ -133,18 +130,13 @@ load_state(){
 }
 save_state(){
   local evm="$1" trap="$2" ipv4="$3" bloom="$4" reg="$5" optin="$6"
-  jq -n \
-    --arg evm "$evm" --arg trap "$trap" --arg ipv4 "$ipv4" \
-    --argjson bloom "${bloom:-0}" --argjson reg "${reg:-0}" --argjson optin "${optin:-0}" \
-    --arg ts "$(date --iso-8601=seconds)" \
-    '{evm_address:$evm, trap_address:$trap, vps_ipv4:$ipv4, bloomboost_ok:$bloom, register_ok:$reg, optin_ok:$optin, updated_at:$ts}' \
-    > "$STATE_JSON"
+  jq -n --arg evm "$evm" --arg trap "$trap" --arg ipv4 "$ipv4" \
+     --argjson bloom "${bloom:-0}" --argjson reg "${reg:-0}" --argjson optin "${optin:-0}" \
+     --arg ts "$(date --iso-8601=seconds)" \
+     '{evm_address:$evm, trap_address:$trap, vps_ipv4:$ipv4, bloomboost_ok:$bloom, register_ok:$reg, optin_ok:$optin, updated_at:$ts}' \
+     > "$STATE_JSON"
 }
-set_state_flag(){
-  local key="$1" val="${2:-0}"
-  [[ -f "$STATE_JSON" ]] || return 0
-  jq --arg k "$key" --argjson v "$val" '.[$k]=$v' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
-}
+set_state_flag(){ local key="$1" val="${2:-0}"; [[ -f "$STATE_JSON" ]] || return 0; jq --arg k "$key" --argjson v "$val" '.[$k]=$v' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"; }
 migrate_summary_to_state(){
   [[ -f "$STATE_JSON" ]] && return 0
   [[ -f "$SUMMARY_JSON" ]] || return 0
@@ -186,69 +178,33 @@ msg "Cài Foundry..."; curl -fsSL https://foundry.paradigm.xyz | bash; add_path_
 CAST_BIN="$(command -v cast || true)"; [[ -x "${CAST_BIN:-}" ]] || CAST_BIN="/root/.foundry/bin/cast"
 forge --version || true; "$CAST_BIN" --version || true
 
-# ----- Install droseraup from GitHub Raw (fix 403) -----
+# ----- Install droseraup via GitHub Raw -----
 install_drosera_cli() {
   msg "Cài droseraup từ GitHub Raw..."
   local tmp="/tmp/drosera_install_$$.sh"
   local url_installer="https://raw.githubusercontent.com/drosera-network/releases/main/droseraup/install"
-
-  # Tải installer (retry + UA)
   local code
-  code=$(curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' \
-    --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
-    -w '%{http_code}' -fsSL "$url_installer" -o "$tmp" || true)
+  code=$(curl -A 'Mozilla/5.0 (X11; Linux x86_64)' --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
+         -w '%{http_code}' -fsSL "$url_installer" -o "$tmp" || true)
   if [[ "$code" != "200" ]]; then
-    warn "Tải installer thất bại (HTTP $code). Kiểm tra kết nối tới GitHub Raw."
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
+    warn "Tải installer thất bại (HTTP $code)."; rm -f "$tmp" 2>/dev/null || true; return 1
   fi
-
-  # Chạy installer: nó sẽ tải droseraup binary về ~/.drosera/bin/droseraup
-  bash "$tmp"
-  local rc=$?
-  rm -f "$tmp" 2>/dev/null || true
-  if [[ $rc -ne 0 ]]; then
-    warn "Installer chạy lỗi (rc=$rc)."
-    return 1
-  fi
-
-  # Thêm PATH hiện tại cho phiên làm việc này
+  bash "$tmp"; local rc=$?; rm -f "$tmp" 2>/dev/null || true
+  if [[ $rc -ne 0 ]]; then warn "Installer chạy lỗi (rc=$rc)."; return 1; fi
   add_path_once 'export PATH=$PATH:/root/.drosera/bin'
-
-  # Chạy droseraup để cài drosera & drosera-operator
-  if command -v droseraup >/dev/null 2>&1; then
-    droseraup || true
-  elif [[ -x "/root/.drosera/bin/droseraup" ]]; then
-    "/root/.drosera/bin/droseraup" || true
-  fi
-
-  # Tìm drosera binary
-  DROSERA_BIN="$(command -v drosera || true)"
-  [[ -x "${DROSERA_BIN:-}" ]] || DROSERA_BIN="/root/.drosera/bin/drosera"
-  if [[ ! -x "$DROSERA_BIN" ]]; then
-    warn "Không tìm thấy drosera CLI sau khi cài. Sẽ bỏ qua bloomboost và yêu cầu --trap để tiếp tục."
-    return 1
-  fi
-
-  "$DROSERA_BIN" --version || true
-  return 0
+  if command -v droseraup >/dev/null 2>&1; then droseraup || true; elif [[ -x "/root/.drosera/bin/droseraup" ]]; then "/root/.drosera/bin/droseraup" || true; fi
+  DROSERA_BIN="$(command -v drosera || true)"; [[ -x "${DROSERA_BIN:-}" ]] || DROSERA_BIN="/root/.drosera/bin/drosera"
+  [[ -x "$DROSERA_BIN" ]] || { warn "Không tìm thấy drosera CLI sau khi cài."; return 1; }
+  "$DROSERA_BIN" --version || true; return 0
 }
-if ! install_drosera_cli; then
-  NO_DROSERA_CLI=1
-else
-  NO_DROSERA_CLI=""
-fi
+if ! install_drosera_cli; then NO_DROSERA_CLI=1; else NO_DROSERA_CLI=""; fi
 
 # ======================== Wallet =========================
 if [[ -z "${PK_RAW:-}" ]]; then read -rsp "Private key (64 hex, có/không 0x): " PK_RAW; echo; fi
 [[ "$PK_RAW" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || { echo "Private key không hợp lệ"; exit 1; }
 PK_HEX="0x${PK_RAW#0x}"
-if [[ -x "$CAST_BIN" ]]; then
-  ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX")
-else
-  echo "Thiếu 'cast' (Foundry). Không thể suy địa chỉ ví." >&2
-  exit 1
-fi
+PK_NO0X="${PK_HEX#0x}"
+if [[ -x "$CAST_BIN" ]]; then ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX"); else echo "Thiếu 'cast'."; exit 1; fi
 msg "Địa chỉ ví: $ADDR"
 
 # ======================== Resume state ===================
@@ -261,21 +217,17 @@ ensure_git_identity
 if [[ -d "$TRAP_DIR/.git" && ! -f "$TRAP_DIR/foundry.toml" ]]; then rm -rf "$TRAP_DIR"; fi
 mkdir -p "$TRAP_DIR"; cd "$TRAP_DIR"
 if [[ ! -f "foundry.toml" ]]; then forge init -t drosera-network/trap-foundry-template || true; fi
-
 set +e
-bun install || true
-forge build || true
+bun install || true; forge build || true
 [[ -f drosera.toml ]] || { echo "Thiếu drosera.toml"; touch drosera.toml; }
-
 cp -f drosera.toml drosera.toml.bak 2>/dev/null
-# whitelist
+# whitelist & drosera_rpc
 if grep -Eq '^[[:space:]]*whitelist[[:space:]]*=' drosera.toml; then
   sed -i "s|^[[:space:]]*whitelist[[:space:]]*=.*|whitelist = [\"$ADDR\"]|g" drosera.toml
 else
   awk -v a="$ADDR" 'BEGIN{d=0} /^\[traps\.mytrap\][[:space:]]*$/ {print; print "whitelist = [\"" a "\"]"; d=1; next} {print} END{if(!d) print "whitelist = [\"" a "\"]"}' \
     drosera.toml > drosera.toml.tmp && mv drosera.toml.tmp drosera.toml
 fi
-# drosera_rpc
 if grep -Eq '^[[:space:]]*drosera_rpc[[:space:]]*=' drosera.toml; then
   sed -i "s|^[[:space:]]*drosera_rpc[[:space:]]*=.*|drosera_rpc = \"$DROSERA_RELAY_RPC\"|g" drosera.toml
 else
@@ -283,64 +235,56 @@ else
 fi
 
 # ================= Trap address resolve ==================
-TRAP_ADDR=""
-SKIP_APPLY=""
+TRAP_ADDR=""; SKIP_APPLY=""
 [[ -n "$TRAP_OVERRIDE" ]] && TRAP_ADDR="$(echo "$TRAP_OVERRIDE" | tr 'A-Z' 'a-z')"
-
 if [[ -z "$TRAP_ADDR" && -n "${STATE_TRAP:-}" ]]; then
   CODE=$("$CAST_BIN" code "$STATE_TRAP" --rpc-url "$HOODI_RPC" 2>/dev/null || echo "0x")
   if [[ "$CODE" != "0x" ]]; then TRAP_ADDR="$STATE_TRAP"; SKIP_APPLY=1; msg "Trap từ state: $TRAP_ADDR (đã deploy) → skip apply"; fi
 fi
-
 if [[ -z "$TRAP_ADDR" && -f "$SUMMARY_JSON" ]]; then
   SUM_TRAP=$(jq -r '.trap_address // empty' "$SUMMARY_JSON" 2>/dev/null || true)
   if [[ "$SUM_TRAP" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     CODE=$("$CAST_BIN" code "$SUM_TRAP" --rpc-url "$HOODI_RPC" 2>/dev/null || echo "0x")
-    if [[ "$CODE" != "0x" ]]; then
-      TRAP_ADDR="$(echo "$SUM_TRAP" | tr 'A-Z' 'a-z')"; SKIP_APPLY=1
-      msg "Trap từ summary: $TRAP_ADDR (đã deploy) → skip apply"
-    fi
+    if [[ "$CODE" != "0x" ]]; then TRAP_ADDR="$(echo "$SUM_TRAP" | tr 'A-Z' 'a-z')"; SKIP_APPLY=1; msg "Trap từ summary: $TRAP_ADDR (đã deploy) → skip apply"; fi
   fi
 fi
 
-drosera_apply_noninteractive(){
-  if [[ -n "${NO_DROSERA_CLI:-}" ]]; then
-    echo "NO_DROSERA_CLI" >&2
-    return 2
-  fi
-  if "$DROSERA_BIN" apply --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
-    env DROSERA_PRIVATE_KEY="$PK_HEX" "$DROSERA_BIN" apply --yes
-    return $?
-  fi
-  /usr/bin/env PK_HEX="$PK_HEX" DROSERA_BIN="$DROSERA_BIN" expect <<'EOF'
+# ---- apply (robust: 0x / no-0x, env + flag, no pipe, full log) ----
+apply_supports_flag(){ "$DROSERA_BIN" apply --help 2>&1 | grep -q -- '--eth-private-key'; }
+drosera_apply_attempts(){
+  local key
+  for key in "$PK_HEX" "$PK_NO0X"; do
+    if apply_supports_flag; then
+      DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" apply --yes --eth-private-key "$key" && return 0
+    else
+      /usr/bin/env PK_VAL="$key" DROSERA_BIN="$DROSERA_BIN" expect <<'EOF'
 set timeout 300
-spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_HEX)" "$env(DROSERA_BIN)" apply
+spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" apply
 expect {
   -re {Do you want to .* \[ofc/N\]:} {send -- "ofc\r"}
   eof {}
 }
 expect eof
 EOF
+      [[ $? -eq 0 ]] && return 0
+    fi
+  done
+  return 1
 }
 
-if [[ -z "$TRAP_ADDR" && -z "$SKIP_APPLY" ]]; then
+if [[ -z "$TRAP_ADDR" && -z "$SKIP_APPLY" && -z "${NO_DROSERA_CLI:-}" ]]; then
   msg "drosera apply ..."
-  drosera_apply_noninteractive | tee drosera_apply.log
+  APPLY_RC=0
+  drosera_apply_attempts > drosera_apply.log 2>&1 || APPLY_RC=$?
+  cat drosera_apply.log
+  if [[ $APPLY_RC -ne 0 ]]; then warn "Apply thất bại (rc=$APPLY_RC)."; fi
   TRAP_ADDR="$(extract_trap_address || true)"
   if [[ ! "$TRAP_ADDR" =~ ^0x[0-9a-fA-F]{40}$ || "$TRAP_ADDR" =~ ^0x0{40}$ ]]; then
     warn "Không trích được trapAddress rõ ràng. Nhập (0x...):"
     read -r TRAP_ADDR
   fi
-elif [[ -n "$SKIP_APPLY" ]]; then
-  : # nothing
-elif [[ -n "$TRAP_ADDR" ]]; then
-  : # provided by --trap
-elif [[ -n "${NO_DROSERA_CLI:-}" ]]; then
-  warn "Không có drosera CLI → bỏ qua apply. Cần --trap 0x<addr> để tiếp tục."
-  if [[ -z "${TRAP_OVERRIDE:-}" && -z "${STATE_TRAP:-}" ]]; then
-    echo "Thiếu trapAddress; không thể tiếp tục. Chạy lại với: --trap 0x<addr>" >&2
-    exit 1
-  fi
+elif [[ -n "${NO_DROSERA_CLI:-}" && -z "$TRAP_OVERRIDE" && -z "$STATE_TRAP" ]]; then
+  warn "Không có drosera CLI → bỏ qua apply. Cần --trap 0x<addr> để tiếp tục."; echo "Thiếu trapAddress; không thể tiếp tục." >&2; exit 1
 fi
 
 TRAP_ADDR="$(echo "$TRAP_ADDR" | tr 'A-Z' 'a-z')"
@@ -352,28 +296,33 @@ if [[ "$(wait_code_deployed "$TRAP_ADDR" "$HOODI_RPC" "$WAIT_CODE_SECS")" != "ok
   warn "Timeout chờ bytecode; vẫn tiếp tục."
 fi
 
-# ================= Bloomboost ============================
+# ================= Bloomboost (robust key forms) =========
+bb_supports_flag(){ "$DROSERA_BIN" bloomboost --help 2>&1 | grep -q -- '--eth-private-key'; }
 bloomboost_noninteractive(){
-  local trap="$1" amount="$2"
-  if [[ -n "${NO_DROSERA_CLI:-}" ]]; then
-    echo "NO_DROSERA_CLI" >&2
-    return 2
-  fi
-  if "$DROSERA_BIN" bloomboost --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
-    env DROSERA_PRIVATE_KEY="$PK_HEX" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes
-    return $?
-  fi
-  /usr/bin/env PK_HEX="$PK_HEX" DROSERA_BIN="$DROSERA_BIN" BB_TRAP="$trap" BB_AMT="$amount" expect <<'EOF'
+  local trap="$1" amount="$2" key
+  for key in "$PK_HEX" "$PK_NO0X"; do
+    if "$DROSERA_BIN" bloomboost --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
+      if bb_supports_flag; then
+        DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes --eth-private-key "$key" && return 0
+      else
+        DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes && return 0
+      fi
+    else
+      /usr/bin/env PK_VAL="$key" DROSERA_BIN="$DROSERA_BIN" BB_TRAP="$trap" BB_AMT="$amount" expect <<'EOF'
 set timeout 300
 set trap $env(BB_TRAP)
 set amt  $env(BB_AMT)
-spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_HEX)" "$env(DROSERA_BIN)" bloomboost --trap-address "$trap" --eth-amount "$amt"
+spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" bloomboost --trap-address "$trap" --eth-amount "$amt"
 expect {
   -re {Do you want to boost this trap\? \[ofc/N\]:} {send -- "ofc\r"}
   eof {}
 }
 expect eof
 EOF
+      [[ $? -eq 0 ]] && return 0
+    fi
+  done
+  return 1
 }
 
 BLOOMBOOST_OK="${STATE_BLOOM:-0}"
@@ -382,17 +331,9 @@ if [[ -z "${NO_DROSERA_CLI:-}" ]]; then
     msg "Bloomboost đã OK trước đó → bỏ qua."
   else
     msg "Bloomboost ${ETH_AMOUNT} ETH ..."
-    if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then
-      BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
-    else
-      warn "Bloomboost thất bại, retry sau ${RETRY_DELAY}s..."
-      sleep "$RETRY_DELAY"
-      if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then
-        BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
-      else
-        warn "Bloomboost vẫn thất bại. Tiếp tục."
-      fi
-    fi
+    if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
+    else warn "Bloomboost thất bại, retry sau ${RETRY_DELAY}s..."; sleep "$RETRY_DELAY"
+         bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT" && { BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1; } || warn "Bloomboost vẫn thất bại."; fi
   fi
 else
   warn "Không có drosera CLI → **skip bloomboost**. Có thể chạy lại: /root/drosera.sh --redo-bloomboost --pk 0x... --trap 0x..."
@@ -400,11 +341,8 @@ fi
 
 # ================= Operator repo ========================
 msg "Chuẩn bị Operator repo $OP_DIR ..."
-if [[ -d "$OP_DIR/.git" ]]; then
-  cd "$OP_DIR"; git fetch --all --prune || true; git reset --hard origin/HEAD || git pull --ff-only || true
-else
-  rm -rf "$OP_DIR"; git clone "$OP_REPO_URL" "$OP_DIR"; cd "$OP_DIR"
-fi
+if [[ -d "$OP_DIR/.git" ]]; then cd "$OP_DIR"; git fetch --all --prune || true; git reset --hard origin/HEAD || git pull --ff-only || true
+else rm -rf "$OP_DIR"; git clone "$OP_REPO_URL" "$OP_DIR"; cd "$OP_DIR"; fi
 
 # ================= IPv4 & .env ==========================
 IPV4=""
@@ -473,7 +411,6 @@ run_register(){
   docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_HEX" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
     register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" --drosera-address "$DROSERA_ADDRESS" "${extra[@]}"
 }
-
 run_optin(){
   local extra=()
   if docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 optin --help 2>&1 | grep -q -- '--eth-private-key'; then
@@ -483,27 +420,17 @@ run_optin(){
     optin --eth-rpc-url "$HOODI_RPC" --trap-config-address "$TRAP_ADDR" "${extra[@]}"
 }
 
-if [[ "$REGISTER_OK" -eq 1 && -z "$FORCE_REGISTER" ]]; then
-  msg "Register đã OK trước đó → bỏ qua."
+if [[ "$REGISTER_OK" -eq 1 && -z "$FORCE_REGISTER" ]]; then msg "Register đã OK trước đó → bỏ qua."
 else
-  msg "Đăng ký operator (register)..."
-  docker pull ghcr.io/drosera-network/drosera-operator:v1.20.0 >/dev/null 2>&1 || true
+  msg "Đăng ký operator (register)..."; docker pull ghcr.io/drosera-network/drosera-operator:v1.20.0 >/dev/null 2>&1 || true
   if run_register; then REGISTER_OK=1; set_state_flag "register_ok" 1
-  else
-    warn "Register thất bại, retry sau ${RETRY_DELAY}s..."; sleep "$RETRY_DELAY"
-    run_register || warn "Register vẫn thất bại."
-  fi
+  else warn "Register thất bại, retry sau ${RETRY_DELAY}s..."; sleep "$RETRY_DELAY"; run_register || warn "Register vẫn thất bại."; fi
 fi
 
-if [[ "$OPTIN_OK" -eq 1 && -z "$FORCE_OPTIN" ]]; then
-  msg "Opt-in đã OK trước đó → bỏ qua."
+if [[ "$OPTIN_OK" -eq 1 && -z "$FORCE_OPTIN" ]]; then msg "Opt-in đã OK trước đó → bỏ qua."
 else
-  msg "Opt-in operator ..."
-  if run_optin; then OPTIN_OK=1; set_state_flag "optin_ok" 1
-  else
-    warn "Opt-in thất bại, retry sau ${RETRY_DELAY}s..."; sleep "$RETRY_DELAY"
-    run_optin || warn "Opt-in vẫn thất bại."
-  fi
+  msg "Opt-in operator ..."; if run_optin; then OPTIN_OK=1; set_state_flag "optin_ok" 1
+  else warn "Opt-in thất bại, retry sau ${RETRY_DELAY}s..."; sleep "$RETRY_DELAY"; run_optin || warn "Opt-in vẫn thất bại."; fi
 fi
 
 # ================= Final Summary ========================
