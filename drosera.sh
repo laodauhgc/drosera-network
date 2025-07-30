@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v1.9.3 – 30-Jul-2025 (SGT)
-# - Fix: drosera apply "Failed to parse private key" by trying 0x / no-0x, env + flag
-# - Safe logging for apply (no pipe, no ERR trap interference)
-# - Install droseraup via GitHub Raw (fix 403); non-interactive bloomboost
-# - Proper PK passing for operator; Compose V2 cleanup; IPv4; state/summary
+# Drosera One-shot Installer v1.9.6 – 30-Jul-2025 (SGT)
+# - Fix: drosera apply "Failed to parse private key" by setting DRO__ETH__PRIVATE_KEY + DROSERA_PRIVATE_KEY + ETH_PRIVATE_KEY
+#        and trying both 0x / no-0x forms; safer logging (no pipe)
+# - Fix: app.drosera.io 403 by installing droseraup via GitHub raw
+# - Robust bloomboost (non-interactive), operator register/optin with correct key passing
+# - Idempotent; IPv4; compose v2; full logs; state/summary JSON
 
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -39,7 +40,7 @@ PK_RAW=""; MANUAL_IP=""; TRAP_OVERRIDE=""
 REDO_BLOOMBOOST=""; FORCE_REGISTER=""; FORCE_OPTIN=""; FORCE_ENV=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --pk) PK_RAW="${2#0x}"; shift 2 ;;
+    --pk) PK_RAW="$2"; shift 2 ;;
     --repo) OP_REPO_URL="$2"; shift 2 ;;
     --ip) MANUAL_IP="$2"; shift 2 ;;
     --trap) TRAP_OVERRIDE="$2"; shift 2 ;;
@@ -108,7 +109,10 @@ wait_code_deployed(){
 last_nonzero_address_from(){ grep -ahoE '0x[a-fA-F0-9]{40}' "$@" 2>/dev/null | awk '{print tolower($0)}' | awk '!/^0x0{40}$/' | tail -n1; }
 extract_trap_address(){
   local addr=""
+  # drosera apply (v1.20.0) thường log "Created Trap Config" hoặc "trapAddress:"
   addr=$(awk '/Created Trap Config/{f=1} f && /- address:/{print $3}' drosera_apply.log 2>/dev/null | tail -n1 | tr 'A-Z' 'a-z') || true
+  [[ "$addr" =~ ^0x[0-9a-f]{40}$ ]] && echo "$addr" && return 0
+  addr=$(grep -ahoE 'trapAddress: 0x[a-fA-F0-9]{40}' drosera_apply.log 2>/dev/null | awk '{print tolower($2)}' | tail -n1) || true
   [[ "$addr" =~ ^0x[0-9a-f]{40}$ ]] && echo "$addr" && return 0
   [[ -f drosera.log ]] && addr=$(awk '/Created Trap Config/{f=1} f && /- address:/{print $3}' drosera.log 2>/dev/null | tail -n1 | tr 'A-Z' 'a-z') || true
   [[ "$addr" =~ ^0x[0-9a-f]{40}$ ]] && echo "$addr" && return 0
@@ -116,6 +120,7 @@ extract_trap_address(){
   [[ "$addr" =~ ^0x[0-9a-f]{40}$ ]] && echo "$addr" && return 0
   return 1
 }
+mask_key(){ local k="$1"; local n=${#k}; [[ $n -le 8 ]] && echo "$k" || echo "${k:0:6}...${k: -4} (len=$n)"; }
 
 # ----- State -----
 STATE_EVM=""; STATE_TRAP=""; STATE_IPV4=""; STATE_BLOOM=""; STATE_REG=""; STATE_OPTIN=""
@@ -178,7 +183,7 @@ msg "Cài Foundry..."; curl -fsSL https://foundry.paradigm.xyz | bash; add_path_
 CAST_BIN="$(command -v cast || true)"; [[ -x "${CAST_BIN:-}" ]] || CAST_BIN="/root/.foundry/bin/cast"
 forge --version || true; "$CAST_BIN" --version || true
 
-# ----- Install droseraup via GitHub Raw -----
+# ----- Install droseraup via GitHub Raw (avoid 403) -----
 install_drosera_cli() {
   msg "Cài droseraup từ GitHub Raw..."
   local tmp="/tmp/drosera_install_$$.sh"
@@ -201,11 +206,14 @@ if ! install_drosera_cli; then NO_DROSERA_CLI=1; else NO_DROSERA_CLI=""; fi
 
 # ======================== Wallet =========================
 if [[ -z "${PK_RAW:-}" ]]; then read -rsp "Private key (64 hex, có/không 0x): " PK_RAW; echo; fi
+# trim whitespace/newlines
+PK_RAW="$(printf %s "$PK_RAW" | tr -d ' \t\r\n')"
 [[ "$PK_RAW" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || { echo "Private key không hợp lệ"; exit 1; }
 PK_HEX="0x${PK_RAW#0x}"
 PK_NO0X="${PK_HEX#0x}"
-if [[ -x "$CAST_BIN" ]]; then ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX"); else echo "Thiếu 'cast'."; exit 1; fi
+ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX")
 msg "Địa chỉ ví: $ADDR"
+msg "Key forms sẽ thử: $(mask_key "$PK_HEX"), $(mask_key "$PK_NO0X")"
 
 # ======================== Resume state ===================
 migrate_summary_to_state || true
@@ -221,6 +229,7 @@ set +e
 bun install || true; forge build || true
 [[ -f drosera.toml ]] || { echo "Thiếu drosera.toml"; touch drosera.toml; }
 cp -f drosera.toml drosera.toml.bak 2>/dev/null
+
 # whitelist & drosera_rpc
 if grep -Eq '^[[:space:]]*whitelist[[:space:]]*=' drosera.toml; then
   sed -i "s|^[[:space:]]*whitelist[[:space:]]*=.*|whitelist = [\"$ADDR\"]|g" drosera.toml
@@ -237,6 +246,7 @@ fi
 # ================= Trap address resolve ==================
 TRAP_ADDR=""; SKIP_APPLY=""
 [[ -n "$TRAP_OVERRIDE" ]] && TRAP_ADDR="$(echo "$TRAP_OVERRIDE" | tr 'A-Z' 'a-z')"
+
 if [[ -z "$TRAP_ADDR" && -n "${STATE_TRAP:-}" ]]; then
   CODE=$("$CAST_BIN" code "$STATE_TRAP" --rpc-url "$HOODI_RPC" 2>/dev/null || echo "0x")
   if [[ "$CODE" != "0x" ]]; then TRAP_ADDR="$STATE_TRAP"; SKIP_APPLY=1; msg "Trap từ state: $TRAP_ADDR (đã deploy) → skip apply"; fi
@@ -249,17 +259,18 @@ if [[ -z "$TRAP_ADDR" && -f "$SUMMARY_JSON" ]]; then
   fi
 fi
 
-# ---- apply (robust: 0x / no-0x, env + flag, no pipe, full log) ----
+# ---- apply (robust key envs + 0x/no-0x; no pipe; full log) ----
 apply_supports_flag(){ "$DROSERA_BIN" apply --help 2>&1 | grep -q -- '--eth-private-key'; }
 drosera_apply_attempts(){
   local key
   for key in "$PK_HEX" "$PK_NO0X"; do
     if apply_supports_flag; then
-      DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" apply --yes --eth-private-key "$key" && return 0
+      DRO__ETH__PRIVATE_KEY="$key" DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" \
+        "$DROSERA_BIN" apply --yes --eth-private-key "$key" && return 0
     else
       /usr/bin/env PK_VAL="$key" DROSERA_BIN="$DROSERA_BIN" expect <<'EOF'
 set timeout 300
-spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" apply
+spawn -noecho env DRO__ETH__PRIVATE_KEY="$env(PK_VAL)" DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" apply
 expect {
   -re {Do you want to .* \[ofc/N\]:} {send -- "ofc\r"}
   eof {}
@@ -276,7 +287,8 @@ if [[ -z "$TRAP_ADDR" && -z "$SKIP_APPLY" && -z "${NO_DROSERA_CLI:-}" ]]; then
   msg "drosera apply ..."
   APPLY_RC=0
   drosera_apply_attempts > drosera_apply.log 2>&1 || APPLY_RC=$?
-  cat drosera_apply.log
+  # hiển thị log để dễ debug khi fail
+  sed -n '1,200p' drosera_apply.log || true
   if [[ $APPLY_RC -ne 0 ]]; then warn "Apply thất bại (rc=$APPLY_RC)."; fi
   TRAP_ADDR="$(extract_trap_address || true)"
   if [[ ! "$TRAP_ADDR" =~ ^0x[0-9a-fA-F]{40}$ || "$TRAP_ADDR" =~ ^0x0{40}$ ]]; then
@@ -296,23 +308,25 @@ if [[ "$(wait_code_deployed "$TRAP_ADDR" "$HOODI_RPC" "$WAIT_CODE_SECS")" != "ok
   warn "Timeout chờ bytecode; vẫn tiếp tục."
 fi
 
-# ================= Bloomboost (robust key forms) =========
+# ================= Bloomboost (robust) ===================
 bb_supports_flag(){ "$DROSERA_BIN" bloomboost --help 2>&1 | grep -q -- '--eth-private-key'; }
 bloomboost_noninteractive(){
   local trap="$1" amount="$2" key
   for key in "$PK_HEX" "$PK_NO0X"; do
     if "$DROSERA_BIN" bloomboost --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
       if bb_supports_flag; then
-        DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes --eth-private-key "$key" && return 0
+        DRO__ETH__PRIVATE_KEY="$key" DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" \
+          "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes --eth-private-key "$key" && return 0
       else
-        DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes && return 0
+        DRO__ETH__PRIVATE_KEY="$key" DROSERA_PRIVATE_KEY="$key" ETH_PRIVATE_KEY="$key" \
+          "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes && return 0
       fi
     else
       /usr/bin/env PK_VAL="$key" DROSERA_BIN="$DROSERA_BIN" BB_TRAP="$trap" BB_AMT="$amount" expect <<'EOF'
 set timeout 300
 set trap $env(BB_TRAP)
 set amt  $env(BB_AMT)
-spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" bloomboost --trap-address "$trap" --eth-amount "$amt"
+spawn -noecho env DRO__ETH__PRIVATE_KEY="$env(PK_VAL)" DROSERA_PRIVATE_KEY="$env(PK_VAL)" ETH_PRIVATE_KEY="$env(PK_VAL)" "$env(DROSERA_BIN)" bloomboost --trap-address "$trap" --eth-amount "$amt"
 expect {
   -re {Do you want to boost this trap\? \[ofc/N\]:} {send -- "ofc\r"}
   eof {}
