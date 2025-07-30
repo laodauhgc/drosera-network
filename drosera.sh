@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v1.9.0 – 30-Jul-2025 (SGT)
+# Drosera One-shot Installer v1.9.1 – 30-Jul-2025 (SGT)
 # - Robust non-interactive bloomboost (auto-yes or expect TTY)
 # - Proper private key passing for operator (env DRO__ETH__PRIVATE_KEY + optional --eth-private-key)
 # - Compose V2 cleanup (no 'version'); bugfixes (endif->fi, stray paren)
@@ -182,40 +182,86 @@ ensure_compose
 
 # Toolchain
 msg "Cài Bun...";   curl -fsSL https://bun.sh/install | bash; add_path_once 'export PATH=$PATH:/root/.bun/bin'
-msg "Cài Foundry..."; curl -fsSL https://foundry.paradigm.xyz | bash; add_path_once 'export PATH=$PATH:/root/.foundry/bin'; /root/.foundry/bin/foundryup
+msg "Cài Foundry..."; curl -fsSL https://foundry.paradigm.xyz | bash; add_path_once 'export PATH=$PATH:/root/.foundry/bin'; /root/.foundry/bin/foundryup || true
 CAST_BIN="$(command -v cast || true)"; [[ -x "${CAST_BIN:-}" ]] || CAST_BIN="/root/.foundry/bin/cast"
-forge --version; "$CAST_BIN" --version
-msg "Cài Drosera CLI..."; curl -fsSL https://app.drosera.io/install | bash; add_path_once 'export PATH=$PATH:/root/.drosera/bin'; droseraup || true
-DROSERA_BIN="$(command -v drosera || true)"
-[[ -x "${DROSERA_BIN:-}" ]] || DROSERA_BIN="/root/.drosera/bin/drosera"
-if [[ ! -x "$DROSERA_BIN" ]]; then
-  warn "Không tìm thấy drosera sau cài đặt. Thử reload PATH..."
-  source /root/.bashrc || true
-  DROSERA_BIN="$(command -v drosera || true)"
-fi
-[[ -x "${DROSERA_BIN:-}" ]] || { echo "Không tìm thấy drosera CLI"; exit 1; }
-"$DROSERA_BIN" --version || true
+forge --version || true; "$CAST_BIN" --version || true
 
-# Wallet
+# ----- Drosera CLI (robust) -----
+install_drosera_cli() {
+  msg "Cài Drosera CLI (robust)..."
+  local tmp="/tmp/drosera_install_$$.sh"
+  local urls=(
+    "https://app.drosera.io/install"
+    # Bạn có thể thêm mirrors cá nhân tại đây (bỏ comment các dòng dưới nếu đã host sẵn):
+    # "https://raw.githubusercontent.com/laodauhgc/drosera-network/main/scripts/drosera-install.sh"
+    # "https://raw.githubusercontent.com/sdohuajia/Drosera-Network/main/scripts/drosera-install.sh"
+  )
+  local ok=""
+  for u in "${urls[@]}"; do
+    msg "Tải installer: $u"
+    local code
+    code=$(curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' \
+      --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
+      -w '%{http_code}' -fsSL "$u" -o "$tmp" || true)
+    if [[ "$code" == "200" ]] && grep -Eq 'droseraup|DROSERA' "$tmp"; then
+      bash "$tmp" && ok="1" && break
+    else
+      warn "Tải hoặc chạy installer thất bại (HTTP $code). Thử mirror khác..."
+    fi
+  done
+  rm -f "$tmp" 2>/dev/null || true
+
+  if [[ -n "$ok" ]]; then
+    add_path_once 'export PATH=$PATH:/root/.drosera/bin'
+    if command -v droseraup >/dev/null 2>&1; then
+      droseraup || true
+    elif [[ -x "/root/.drosera/bin/droseraup" ]]; then
+      "/root/.drosera/bin/droseraup" || true
+    fi
+  fi
+
+  DROSERA_BIN="$(command -v drosera || true)"
+  [[ -x "${DROSERA_BIN:-}" ]] || DROSERA_BIN="/root/.drosera/bin/drosera"
+  if [[ ! -x "$DROSERA_BIN" ]]; then
+    warn "Không tìm thấy drosera CLI sau khi thử cài đặt. Sẽ bỏ qua bước bloomboost và yêu cầu --trap để tiếp tục."
+    return 1
+  fi
+
+  "$DROSERA_BIN" --version || true
+  return 0
+}
+if ! install_drosera_cli; then
+  NO_DROSERA_CLI=1
+else
+  NO_DROSERA_CLI=""
+fi
+
+# ======================== Wallet =========================
 if [[ -z "${PK_RAW:-}" ]]; then read -rsp "Private key (64 hex, có/không 0x): " PK_RAW; echo; fi
 [[ "$PK_RAW" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || { echo "Private key không hợp lệ"; exit 1; }
 PK_HEX="0x${PK_RAW#0x}"
-ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX")
+if [[ -x "$CAST_BIN" ]]; then
+  ADDR=$("$CAST_BIN" wallet address --private-key "$PK_HEX")
+else
+  echo "Thiếu 'cast' (Foundry). Không thể suy địa chỉ ví. Hãy đảm bảo foundry đã cài." >&2
+  exit 1
+fi
 msg "Địa chỉ ví: $ADDR"
 
-# Resume state
+# ======================== Resume state ===================
 migrate_summary_to_state || true
 load_state || true
 
-# Trap project
+# ======================== Trap project ===================
 msg "Chuẩn bị $TRAP_DIR ..."
 ensure_git_identity
 if [[ -d "$TRAP_DIR/.git" && ! -f "$TRAP_DIR/foundry.toml" ]]; then rm -rf "$TRAP_DIR"; fi
 mkdir -p "$TRAP_DIR"; cd "$TRAP_DIR"
-if [[ ! -f "foundry.toml" ]]; then forge init -t drosera-network/trap-foundry-template; fi
+if [[ ! -f "foundry.toml" ]]; then forge init -t drosera-network/trap-foundry-template || true; fi
 
 set +e
-bun install; forge build
+bun install || true
+forge build || true
 [[ -f drosera.toml ]] || { echo "Thiếu drosera.toml"; touch drosera.toml; }
 
 cp -f drosera.toml drosera.toml.bak 2>/dev/null
@@ -233,7 +279,7 @@ else
   echo "drosera_rpc = \"$DROSERA_RELAY_RPC\"" >> drosera.toml
 fi
 
-# ----- Trap address resolve -----
+# ================= Trap address resolve ==================
 TRAP_ADDR=""
 SKIP_APPLY=""
 [[ -n "$TRAP_OVERRIDE" ]] && TRAP_ADDR="$(echo "$TRAP_OVERRIDE" | tr 'A-Z' 'a-z')"
@@ -255,12 +301,15 @@ if [[ -z "$TRAP_ADDR" && -f "$SUMMARY_JSON" ]]; then
 fi
 
 drosera_apply_noninteractive(){
-  # Thử dùng cờ auto-yes; nếu không có thì expect
-  if "$DROSERA_BIN" apply --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
-    env DROSERA_PRIVATE_KEY="$PK_HEX" "$DROSERA_BIN" apply --yes | tee drosera_apply.log
-    return ${PIPESTATUS[0]}
+  if [[ -n "${NO_DROSERA_CLI:-}" ]]; then
+    echo "NO_DROSERA_CLI" >&2
+    return 2
   fi
-  /usr/bin/env expect <<'EOF'
+  if "$DROSERA_BIN" apply --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
+    env DROSERA_PRIVATE_KEY="$PK_HEX" "$DROSERA_BIN" apply --yes
+    return $?
+  fi
+  /usr/bin/env PK_HEX="$PK_HEX" DROSERA_BIN="$DROSERA_BIN" expect <<'EOF'
 set timeout 300
 spawn -noecho env DROSERA_PRIVATE_KEY="$env(PK_HEX)" "$env(DROSERA_BIN)" apply
 expect {
@@ -279,6 +328,16 @@ if [[ -z "$TRAP_ADDR" && -z "$SKIP_APPLY" ]]; then
     warn "Không trích được trapAddress rõ ràng. Nhập (0x...):"
     read -r TRAP_ADDR
   fi
+elif [[ -n "$SKIP_APPLY" ]]; then
+  : # nothing
+elif [[ -n "$TRAP_ADDR" ]]; then
+  : # provided by --trap
+elif [[ -n "${NO_DROSERA_CLI:-}" ]]; then
+  warn "Không có drosera CLI → bỏ qua apply. Cần --trap 0x<addr> để tiếp tục."
+  if [[ -z "${TRAP_OVERRIDE:-}" && -z "${STATE_TRAP:-}" ]]; then
+    echo "Thiếu trapAddress; không thể tiếp tục. Chạy lại với: --trap 0x<addr>" >&2
+    exit 1
+  fi
 fi
 
 TRAP_ADDR="$(echo "$TRAP_ADDR" | tr 'A-Z' 'a-z')"
@@ -290,14 +349,18 @@ if [[ "$(wait_code_deployed "$TRAP_ADDR" "$HOODI_RPC" "$WAIT_CODE_SECS")" != "ok
   warn "Timeout chờ bytecode; vẫn tiếp tục."
 fi
 
-# ----- Bloomboost non-interactive -----
+# ================= Bloomboost ============================
 bloomboost_noninteractive(){
   local trap="$1" amount="$2"
+  if [[ -n "${NO_DROSERA_CLI:-}" ]]; then
+    echo "NO_DROSERA_CLI" >&2
+    return 2
+  fi
   if "$DROSERA_BIN" bloomboost --help 2>&1 | grep -Eq -- '--yes|--assume-yes|--no-confirm'; then
     env DROSERA_PRIVATE_KEY="$PK_HEX" "$DROSERA_BIN" bloomboost --trap-address "$trap" --eth-amount "$amount" --yes
     return $?
   fi
-  BB_TRAP="$trap" BB_AMT="$amount" /usr/bin/env expect <<'EOF'
+  /usr/bin/env PK_HEX="$PK_HEX" DROSERA_BIN="$DROSERA_BIN" BB_TRAP="$trap" BB_AMT="$amount" expect <<'EOF'
 set timeout 300
 set trap $env(BB_TRAP)
 set amt  $env(BB_AMT)
@@ -311,24 +374,28 @@ EOF
 }
 
 BLOOMBOOST_OK="${STATE_BLOOM:-0}"
-if [[ "$BLOOMBOOST_OK" -eq 1 && -z "$REDO_BLOOMBOOST" ]]; then
-  msg "Bloomboost đã OK trước đó → bỏ qua."
-else
-  msg "Bloomboost ${ETH_AMOUNT} ETH ..."
-  if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then
-    BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
+if [[ -z "${NO_DROSERA_CLI:-}" ]]; then
+  if [[ "$BLOOMBOOST_OK" -eq 1 && -z "$REDO_BLOOMBOOST" ]]; then
+    msg "Bloomboost đã OK trước đó → bỏ qua."
   else
-    warn "Bloomboost thất bại, retry sau ${RETRY_DELAY}s..."
-    sleep "$RETRY_DELAY"
+    msg "Bloomboost ${ETH_AMOUNT} ETH ..."
     if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then
       BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
     else
-      warn "Bloomboost vẫn thất bại. Tiếp tục."
+      warn "Bloomboost thất bại, retry sau ${RETRY_DELAY}s..."
+      sleep "$RETRY_DELAY"
+      if bloomboost_noninteractive "$TRAP_ADDR" "$ETH_AMOUNT"; then
+        BLOOMBOOST_OK=1; set_state_flag "bloomboost_ok" 1
+      else
+        warn "Bloomboost vẫn thất bại. Tiếp tục."
+      fi
     fi
   fi
+else
+  warn "Không có drosera CLI → **skip bloomboost**. Có thể chạy lại: /root/drosera.sh --redo-bloomboost --pk 0x... --trap 0x..."
 fi
 
-# ----- Operator repo -----
+# ================= Operator repo ========================
 msg "Chuẩn bị Operator repo $OP_DIR ..."
 if [[ -d "$OP_DIR/.git" ]]; then
   cd "$OP_DIR"; git fetch --all --prune || true; git reset --hard origin/HEAD || git pull --ff-only || true
@@ -336,7 +403,7 @@ else
   rm -rf "$OP_DIR"; git clone "$OP_REPO_URL" "$OP_DIR"; cd "$OP_DIR"
 fi
 
-# IPv4 & .env
+# ================= IPv4 & .env ==========================
 IPV4=""
 if [[ -n "$MANUAL_IP" ]]; then IPV4="$MANUAL_IP"
 elif [[ -n "${STATE_IPV4:-}" && -z "$FORCE_ENV" ]]; then IPV4="$STATE_IPV4"
@@ -359,7 +426,7 @@ EOF
 fi
 save_state "$ADDR" "$TRAP_ADDR" "$IPV4" "$BLOOMBOOST_OK" "${STATE_REG:-0}" "${STATE_OPTIN:-0}"
 
-# ----- docker-compose.yaml (không dùng key 'version') -----
+# ================= docker-compose.yaml ==================
 cat > docker-compose.yaml <<'YAML'
 services:
   drosera-operator:
@@ -391,7 +458,7 @@ compose -f "$COMPOSE_FILE" config >/dev/null
 msg "docker compose up -d ..."
 compose -f "$COMPOSE_FILE" up -d || { warn "compose up thất bại, retry sau ${RETRY_DELAY}s"; sleep "$RETRY_DELAY"; compose -f "$COMPOSE_FILE" up -d || warn "compose vẫn lỗi, tiếp tục."; }
 
-# ----- register & opt-in -----
+# ================= register & opt-in =====================
 REGISTER_OK="${STATE_REG:-0}"
 OPTIN_OK="${STATE_OPTIN:-0}"
 
@@ -436,7 +503,7 @@ else
   fi
 fi
 
-# ----- Summary -----
+# ================= Final Summary ========================
 load_state || true
 CUR_BLOOM="${STATE_BLOOM:-$BLOOMBOOST_OK}"
 CUR_REG="${STATE_REG:-$REGISTER_OK}"
