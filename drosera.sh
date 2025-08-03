@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v2.3.0 – 03-Aug-2025 (SGT)
-# Changes vs v2.2.0:
-# - Thêm cơ chế chọn RPC thông minh + fallback (ưu tiên danh sách người dùng cung cấp)
-# - Hỗ trợ --rpc, --rpc-list, --no-ask-rpc; nếu tất cả RPC lỗi sẽ yêu cầu nhập tay (mặc định)
-# - Ghi vào docker-compose: sử dụng ETH_RPC_URL và ETH_BACKUP_RPC_URL (primary/backup khác domain)
-# - Đánh dấu register_ok=1 nếu gặp OperatorAlreadyRegistered
-# - Opt-in: nếu primary 403 sẽ thử backup RPC
-# - Giữ nguyên các cải tiến v2.2.0 (lock drosera binary, export env cho expect, trích trapAddress, chờ bytecode)
+# Drosera One-shot Installer v2.3.1 – 03-Aug-2025 (SGT)
+# Hotfix vs v2.3.0:
+# - Sửa lỗi khối capture output/exit-code dưới set -e (register/opt-in)
+# - Tránh dùng command substitution khi lệnh có thể fail → không bị trap ERR
+# - Loại bỏ RPC Ankr sai do người dùng báo
+# - Giữ toàn bộ cải tiến chọn RPC thông minh + fallback
 
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -51,9 +49,8 @@ warn(){ printf '[%(%F %T)T] WARN: %s\n' -1 "$*" >&2; }
 # Danh sách RPC thử lần lượt (ưu tiên của bạn trước)
 # Có thể override bằng: --rpc-list "url1,url2,..." hoặc --rpc <url>
 RPC_LIST_DEFAULT=(
-  # ƯU TIÊN: các RPC người dùng cung cấp
+  # ƯU TIÊN: RPC người dùng cung cấp (đã loại bỏ endpoint sai)
   "https://rpc.ankr.com/eth_hoodi/c54291b21199feab4e2aa0f79cf6d1167a99fbf0d2c8c77e422e654fc43efa87"
-  "https://rpc.ankr.com/eth_hoodi/567d96506634fa5371ec55f9fcca8eb76bb72ae52ebe8c21f3d24a762d209d1d"
 
   # RPC mặc định hiện có
   "${HOODI_RPC:-https://ethereum-hoodi-rpc.publicnode.com}"
@@ -616,15 +613,25 @@ if [[ "$REGISTER_OK" -ne 1 || -n "$FORCE_REGISTER" ]]; then
   HAS_OP_PK_FLAG=0
   docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 register --help 2>&1 | grep -q -- '--eth-private-key' && HAS_OP_PK_FLAG=1 || true
 
+  reg_tmp="$(mktemp)"
   if [[ "$HAS_OP_PK_FLAG" -eq 1 ]]; then
-    out="$({ docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+    set +e
+    docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
       register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" \
                --drosera-address "$DROSERA_ADDRESS" \
-               --eth-private-key "$PK_0X"; } 2>&1)"; rc=$?
+               --eth-private-key "$PK_0X" \
+      >"$reg_tmp" 2>&1
+    rc=$?
+    set -e
   else
-    out="$({ docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
-      register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" --drosera-address "$DROSERA_ADDRESS"; } 2>&1)"; rc=$?
+    set +e
+    docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+      register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" --drosera-address "$DROSERA_ADDRESS" \
+      >"$reg_tmp" 2>&1
+    rc=$?
+    set -e
   fi
+  out="$(cat "$reg_tmp")"; rm -f "$reg_tmp"
 
   if [[ "$rc" -eq 0 ]] || grep -q 'OperatorAlreadyRegistered' <<<"$out"; then
     REGISTER_OK=1; set_state_flag "register_ok" 1
@@ -642,26 +649,44 @@ if [[ "$OPTIN_OK" -ne 1 || -n "$FORCE_OPTIN" ]]; then
     docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 optin --help 2>&1 | grep -q -- '--eth-private-key' && HAS_OP_PK_FLAG=1 || true
 
     run_optin() {
-      local rpc="$1" out rc
+      local rpc="$1" tmp rc
+      tmp="$(mktemp)"
       if [[ "$HAS_OP_PK_FLAG" -eq 1 ]]; then
-        out="$({ docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+        set +e
+        docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
           optin --eth-rpc-url "$rpc" \
                 --trap-config-address "$TRAP_ADDR" \
-                --eth-private-key "$PK_0X"; } 2>&1)"; rc=$?
+                --eth-private-key "$PK_0X" \
+          >"$tmp" 2>&1
+        rc=$?
+        set -e
       else
-        out="$({ docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
-          optin --eth-rpc-url "$rpc" --trap-config-address "$TRAP_ADDR"; } 2>&1)"; rc=$?
+        set +e
+        docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+          optin --eth-rpc-url "$rpc" --trap-config-address "$TRAP_ADDR" \
+          >"$tmp" 2>&1
+        rc=$?
+        set -e
       fi
-      echo "$out"
+      OUT_CONTENT="$(cat "$tmp")"
+      rm -f "$tmp"
       return "$rc"
     }
 
-    out="$(run_optin "$HOODI_RPC")"; rc=$?
-
-    if [[ "$rc" -ne 0 && -n "${BACKUP_HOODI_RPC:-}" && "$BACKUP_HOODI_RPC" != "$HOODI_RPC" ]] && is_rpc_403 "$out"; then
-      warn "RPC primary bị 403 → thử backup"
-      out2="$(run_optin "$BACKUP_HOODI_RPC")"; rc=$?
-      [[ "$rc" -eq 0 ]] && out="$out2"
+    # Try primary
+    if run_optin "$HOODI_RPC"; then
+      out="$OUT_CONTENT"; rc=0
+    else
+      out="$OUT_CONTENT"; rc=$?
+      # Nếu 403 → thử backup
+      if [[ "$rc" -ne 0 && -n "${BACKUP_HOODI_RPC:-}" && "$BACKUP_HOODI_RPC" != "$HOODI_RPC" ]] && is_rpc_403 "$out"; then
+        warn "RPC primary bị 403 → thử backup"
+        if run_optin "$BACKUP_HOODI_RPC"; then
+          out="$OUT_CONTENT"; rc=0
+        else
+          out="$OUT_CONTENT"; rc=$?
+        fi
+      fi
     fi
 
     if [[ "$rc" -eq 0 ]]; then
