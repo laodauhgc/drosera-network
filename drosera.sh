@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Drosera One-shot Installer v2.2.0 – 31-Jul-2025 (SGT)
-# Patch notes vs v2.1.0:
-# - LUÔN dùng /root/.drosera/bin/drosera (không override bằng `command -v drosera`)
-# - Export HOODI_RPC/DROSERA_RELAY_RPC/CHAIN_ID/DROSERA_ADDRESS trước khi dùng expect
-# - Trích trapAddress robust: grep "- address:" (case-insensitive), bỏ zero-address, fallback drosera.toml
-# - Chờ bytecode trước opt-in
+# Drosera One-shot Installer v2.3.0 – 03-Aug-2025 (SGT)
+# Changes vs v2.2.0:
+# - Thêm cơ chế chọn RPC thông minh + fallback (ưu tiên danh sách người dùng cung cấp)
+# - Hỗ trợ --rpc, --rpc-list, --no-ask-rpc; nếu tất cả RPC lỗi sẽ yêu cầu nhập tay (mặc định)
+# - Ghi vào docker-compose: sử dụng ETH_RPC_URL và ETH_BACKUP_RPC_URL (primary/backup khác domain)
+# - Đánh dấu register_ok=1 nếu gặp OperatorAlreadyRegistered
+# - Opt-in: nếu primary 403 sẽ thử backup RPC
+# - Giữ nguyên các cải tiến v2.2.0 (lock drosera binary, export env cho expect, trích trapAddress, chờ bytecode)
 
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -20,7 +22,7 @@ OP_DIR="${OP_DIR:-/root/Drosera-Network}"
 OP_REPO_URL_DEFAULT="https://github.com/laodauhgc/drosera-network.git"
 OP_REPO_URL="${OP_REPO_URL:-$OP_REPO_URL_DEFAULT}"
 
-# Pin chain & endpoints
+# Pin chain & endpoints (sẽ được override bởi bộ chọn RPC)
 export CHAIN_ID="${CHAIN_ID:-560048}"
 export HOODI_RPC="${HOODI_RPC:-https://ethereum-hoodi-rpc.publicnode.com}"
 export DROSERA_ADDRESS="${DROSERA_ADDRESS:-0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D}"
@@ -45,9 +47,91 @@ exec > >(tee -a "$LOG") 2>&1
 msg(){ printf '[%(%F %T)T] %s\n' -1 "$*"; }
 warn(){ printf '[%(%F %T)T] WARN: %s\n' -1 "$*" >&2; }
 
+# =================== RPC candidates & chooser ===================
+# Danh sách RPC thử lần lượt (ưu tiên của bạn trước)
+# Có thể override bằng: --rpc-list "url1,url2,..." hoặc --rpc <url>
+RPC_LIST_DEFAULT=(
+  # ƯU TIÊN: các RPC người dùng cung cấp
+  "https://rpc.ankr.com/eth_hoodi/c54291b21199feab4e2aa0f79cf6d1167a99fbf0d2c8c77e422e654fc43efa87"
+  "https://rpc.ankr.com/eth_hoodi/567d96506634fa5371ec55f9fcca8eb76bb72ae52ebe8c21f3d24a762d209d1d"
+
+  # RPC mặc định hiện có
+  "${HOODI_RPC:-https://ethereum-hoodi-rpc.publicnode.com}"
+
+  # CHÚ Ý: endpoint holesky có chain-id khác → sẽ bị loại qua kiểm tra chain-id
+  "https://rpc.ankr.com/eth_holesky/84c317ede17b1e7bb18244798af6a1680473d1c0b46c133dc041181c839784ca"
+)
+
+ASK_RPC_ON_FAIL="${ASK_RPC_ON_FAIL:-1}"  # 1 = nếu tất cả đều fail thì bắt buộc nhập tay
+FORCED_RPC=""                             # set qua --rpc
+RPC_LIST_CLI=""                           # set qua --rpc-list (chuỗi csv)
+
+# Probe 1 RPC: check chain-id khớp & gọi block-number được (lọc 403/HTML)
+probe_rpc() {
+  local rpc="$1" out cid
+  [[ -z "$rpc" ]] && return 1
+  if ! out="$(cast chain-id --rpc-url "$rpc" 2>/dev/null)"; then
+    return 1
+  fi
+  cid="$(echo "$out" | tr -dc '0-9')"
+  [[ "$cid" == "$CHAIN_ID" ]] || return 2
+  cast block-number --rpc-url "$rpc" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# Chọn RPC hoạt động; nếu tất cả fail và ASK_RPC_ON_FAIL=1 thì yêu cầu nhập tay
+choose_working_rpc() {
+  local -a candidates=("$@")
+  local ok=""
+  for rpc in "${candidates[@]}"; do
+    [[ -z "$rpc" ]] && continue
+    if probe_rpc "$rpc"; then
+      ok="$rpc"
+      break
+    fi
+  done
+  if [[ -n "$ok" ]]; then
+    echo "$ok"
+    return 0
+  fi
+  if [[ "$ASK_RPC_ON_FAIL" == "1" ]]; then
+    while :; do
+      read -rp "Không RPC nào hoạt động. Nhập RPC URL thủ công: " manual
+      [[ -z "$manual" ]] && { echo "RPC trống. Thử lại."; continue; }
+      if probe_rpc "$manual"; then
+        echo "$manual"
+        return 0
+      else
+        echo "RPC không hợp lệ/không khớp chain-id $CHAIN_ID. Thử lại."
+      fi
+    done
+  fi
+  return 1
+}
+
+# Build danh sách RPC (ép 1 cái, danh sách csv, rồi defaults) & loại trùng
+build_rpc_candidates() {
+  local -a arr=()
+  if [[ -n "$FORCED_RPC" ]]; then arr+=("$FORCED_RPC"); fi
+  if [[ -n "$RPC_LIST_CLI" ]]; then
+    IFS=',' read -r -a tmp <<<"$RPC_LIST_CLI"
+    arr+=("${tmp[@]}")
+  fi
+  arr+=("${RPC_LIST_DEFAULT[@]}")
+  declare -A seen=()
+  for x in "${arr[@]}"; do
+    [[ -z "$x" ]] && continue
+    if [[ -z "${seen[$x]+x}" ]]; then
+      echo "$x"
+      seen[$x]=1
+    fi
+  done
+}
+
 # =================== Args ===================
 PK_RAW=""; MANUAL_IP=""; TRAP_OVERRIDE=""
 FORCE_REGISTER=""; FORCE_OPTIN=""; FORCE_ENV=""
+FORCED_RPC=""; RPC_LIST_CLI=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pk) PK_RAW="$2"; shift 2 ;;
@@ -58,6 +142,9 @@ while [[ $# -gt 0 ]]; do
     --force-register) FORCE_REGISTER=1; shift ;;
     --force-optin) FORCE_OPTIN=1; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
+    --rpc) FORCED_RPC="$2"; shift 2 ;;
+    --rpc-list) RPC_LIST_CLI="$2"; shift 2 ;;
+    --no-ask-rpc) ASK_RPC_ON_FAIL=0; shift ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -121,7 +208,6 @@ last_nonzero_address_from(){
 }
 extract_trap_address(){
   local addr=""
-  # Ưu tiên log apply (Created/Updated -> "- address: 0x...")
   if [[ -f drosera_apply.log ]]; then
     addr=$(awk 'BEGIN{IGNORECASE=1}
       /Created Trap Config for|Updated Trap Config for/ {seen=1}
@@ -129,7 +215,6 @@ extract_trap_address(){
         for(i=1;i<=NF;i++) if($i ~ /^0x[0-9a-fA-F]{40}$/){print tolower($i)}
       }' drosera_apply.log | awk '!/^0x0{40}$/' | tail -n1) || true
   fi
-  # Fallback từ drosera.log (nếu có)
   if [[ -z "$addr" && -f drosera.log ]]; then
     addr=$(awk 'BEGIN{IGNORECASE=1}
       /Created Trap Config for|Updated Trap Config for/ {seen=1}
@@ -137,11 +222,9 @@ extract_trap_address(){
         for(i=1;i<=NF;i++) if($i ~ /^0x[0-9a-fA-F]{40}$/){print tolower($i)}
       }' drosera.log | awk '!/^0x0{40}$/' | tail -n1) || true
   fi
-  # Fallback: bất kỳ 0x… (trừ zero)
   if [[ -z "$addr" ]]; then
     addr=$(last_nonzero_address_from drosera_apply.log drosera.log) || true
   fi
-  # Fallback: drosera.toml (nếu apply đã ghi ra)
   if [[ -z "$addr" && -f drosera.toml ]]; then
     addr=$(grep -Eoi 'address\s*=\s*"0x[0-9a-fA-F]{40}"' drosera.toml | grep -Eoi '0x[0-9a-fA-F]{40}' | tr 'A-Z' 'a-z' | awk '!/^0x0{40}$/' | tail -n1) || true
   fi
@@ -182,42 +265,6 @@ add_path_once 'export PATH=$PATH:/root/.foundry/bin'
 /root/.foundry/bin/foundryup
 forge --version
 cast --version
-
-# ---------- droseraup (installer) with robust fallback ----------
-install_droseraup(){
-  local tmp=/tmp/drosera_install.sh
-  msg "Tải installer: https://app.drosera.io/install"
-  if curl -fsSL https://app.drosera.io/install -o "$tmp"; then
-    bash "$tmp"
-  else
-    warn "app.drosera.io bị 403 hoặc lỗi mạng → dùng GitHub Raw fallback."
-    curl -fsSL "https://raw.githubusercontent.com/drosera-network/releases/main/droseraup/install" -o "$tmp"
-    bash "$tmp"
-  fi
-}
-msg "Cài droseraup..."
-install_droseraup
-
-# PATH cho drosera (NHƯNG KHÔNG override DROSERA_BIN đã khóa)
-add_path_once "export PATH=\$PATH:$DRO_BIN_DIR"
-hash -r || true
-
-# Lấy/đổi drosera bằng droseraup (giữ nguyên bản do installer chọn; ưu tiên binary trong $DRO_BIN_DIR)
-if command -v droseraup >/dev/null 2>&1; then
-  droseraup || true
-fi
-
-# KHÓA: luôn dùng $DROSERA_BIN (tuyệt đối). Nếu thiếu thì mới fallback command -v (kèm kiểm tra subcommand apply)
-if [[ ! -x "$DROSERA_BIN" ]]; then
-  if command -v drosera >/dev/null 2>&1; then
-    CAND="$(command -v drosera)"
-    if "$CAND" --help 2>&1 | grep -qE '^\s*apply\b'; then
-      DROSERA_BIN="$CAND"
-    fi
-  fi
-fi
-[[ -x "$DROSERA_BIN" ]] || { echo "Không tìm thấy drosera binary tại $DROSERA_BIN"; exit 1; }
-"$DROSERA_BIN" --version || true
 
 # =================== Wallet & PK sanitize ===================
 if [[ -z "${PK_RAW:-}" ]]; then read -rsp "Private key (64 hex, có/không 0x): " PK_RAW; echo; fi
@@ -296,6 +343,66 @@ if grep -Eq '^[[:space:]]*drosera_rpc[[:space:]]*=' drosera.toml; then
 else
   echo "drosera_rpc = \"$DROSERA_RELAY_RPC\"" >> drosera.toml
 fi
+
+# =================== Chọn RPC trước khi apply/opt-in ===================
+mapfile -t _RPC_CANDIDATES < <(build_rpc_candidates)
+SELECTED_RPC="$(choose_working_rpc "${_RPC_CANDIDATES[@]}")" || {
+  warn "Không tìm được RPC hoạt động và --no-ask-rpc đang bật. Thoát."
+  exit 1
+}
+BACKUP_RPC=""
+for candidate in "${_RPC_CANDIDATES[@]}"; do
+  [[ "$candidate" == "$SELECTED_RPC" ]] && continue
+  if probe_rpc "$candidate"; then
+    BACKUP_RPC="$candidate"
+    break
+  fi
+done
+
+# Ghi đè biến môi trường dùng xuyên suốt
+export HOODI_RPC="$SELECTED_RPC"
+export ETH_RPC_URL="$SELECTED_RPC"
+export BACKUP_HOODI_RPC="${BACKUP_RPC:-$SELECTED_RPC}"
+export ETH_BACKUP_RPC_URL="${BACKUP_HOODI_RPC}"
+
+msg "RPC đã chọn: $HOODI_RPC"
+[[ -n "$BACKUP_HOODI_RPC" && "$BACKUP_HOODI_RPC" != "$HOODI_RPC" ]] && msg "RPC dự phòng: $BACKUP_HOODI_RPC"
+
+# =================== droseraup (installer) with robust fallback ===================
+install_droseraup(){
+  local tmp=/tmp/drosera_install.sh
+  msg "Tải installer: https://app.drosera.io/install"
+  if curl -fsSL https://app.drosera.io/install -o "$tmp"; then
+    bash "$tmp"
+  else
+    warn "app.drosera.io bị 403 hoặc lỗi mạng → dùng GitHub Raw fallback."
+    curl -fsSL "https://raw.githubusercontent.com/drosera-network/releases/main/droseraup/install" -o "$tmp"
+    bash "$tmp"
+  fi
+}
+msg "Cài droseraup..."
+install_droseraup
+
+# PATH cho drosera (NHƯNG KHÔNG override DROSERA_BIN đã khóa)
+add_path_once "export PATH=\$PATH:$DRO_BIN_DIR"
+hash -r || true
+
+# Lấy/đổi drosera bằng droseraup (giữ nguyên bản do installer chọn; ưu tiên binary trong $DRO_BIN_DIR)
+if command -v droseraup >/dev/null 2>&1; then
+  droseraup || true
+fi
+
+# KHÓA: luôn dùng $DROSERA_BIN (tuyệt đối). Nếu thiếu thì mới fallback command -v (kèm kiểm tra subcommand apply)
+if [[ ! -x "$DROSERA_BIN" ]]; then
+  if command -v drosera >/dev/null 2>&1; then
+    CAND="$(command -v drosera)"
+    if "$CAND" --help 2>&1 | grep -qE '^\s*apply\b'; then
+      DROSERA_BIN="$CAND"
+    fi
+  fi
+fi
+[[ -x "$DROSERA_BIN" ]] || { echo "Không tìm thấy drosera binary tại $DROSERA_BIN"; exit 1; }
+"$DROSERA_BIN" --version || true
 
 # =================== Apply (create/update trap config) ===================
 APPLY_OK=0
@@ -464,7 +571,7 @@ EOF
 fi
 save_state "$ADDR" "${TRAP_ADDR:-}" "$IPV4" "$BLOOMBOOST_OK" "${STATE_REG:-0}" "${STATE_OPTIN:-0}"
 
-# docker-compose.yaml (ghi đè chuẩn, pin image)
+# docker-compose.yaml (ghi đè chuẩn, pin image, dùng primary/backup)
 cat > docker-compose.yaml <<'YAML'
 services:
   drosera-operator:
@@ -477,8 +584,8 @@ services:
       - DRO__LISTEN_ADDRESS=0.0.0.0
       - DRO__DISABLE_DNR_CONFIRMATION=true
       - DRO__ETH__CHAIN_ID=560048
-      - DRO__ETH__RPC_URL=https://ethereum-hoodi-rpc.publicnode.com
-      - DRO__ETH__BACKUP_RPC_URL=https://ethereum-hoodi-rpc.publicnode.com
+      - DRO__ETH__RPC_URL=${ETH_RPC_URL:-${HOODI_RPC}}
+      - DRO__ETH__BACKUP_RPC_URL=${ETH_BACKUP_RPC_URL:-${BACKUP_HOODI_RPC:-${HOODI_RPC}}}
       - DRO__ETH__PRIVATE_KEY=${ETH_PRIVATE_KEY}
       - DRO__NETWORK__P2P_PORT=31313
       - DRO__NETWORK__EXTERNAL_P2P_ADDRESS=${VPS_IP}
@@ -499,20 +606,30 @@ compose -f docker-compose.yaml up -d || { warn "compose up thất bại, retry s
 REGISTER_OK="${STATE_REG:-0}"
 OPTIN_OK="${STATE_OPTIN:-0}"
 
+# Helper phát hiện 403/Cloudflare trong log
+is_rpc_403() {
+  grep -qiE 'HTTP error 403|Attention Required|You are unable to access|Cloudflare' <<<"${1:-}"
+}
+
 if [[ "$REGISTER_OK" -ne 1 || -n "$FORCE_REGISTER" ]]; then
   msg "Đăng ký operator (register)..."
   HAS_OP_PK_FLAG=0
   docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 register --help 2>&1 | grep -q -- '--eth-private-key' && HAS_OP_PK_FLAG=1 || true
+
   if [[ "$HAS_OP_PK_FLAG" -eq 1 ]]; then
-    docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+    out="$({ docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
       register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" \
                --drosera-address "$DROSERA_ADDRESS" \
-               --eth-private-key "$PK_0X" \
-    && { REGISTER_OK=1; set_state_flag "register_ok" 1; } || warn "Register thất bại."
+               --eth-private-key "$PK_0X"; } 2>&1)"; rc=$?
   else
-    docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
-      register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" --drosera-address "$DROSERA_ADDRESS" \
-    && { REGISTER_OK=1; set_state_flag "register_ok" 1; } || warn "Register thất bại."
+    out="$({ docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+      register --eth-chain-id "$CHAIN_ID" --eth-rpc-url "$HOODI_RPC" --drosera-address "$DROSERA_ADDRESS"; } 2>&1)"; rc=$?
+  fi
+
+  if [[ "$rc" -eq 0 ]] || grep -q 'OperatorAlreadyRegistered' <<<"$out"; then
+    REGISTER_OK=1; set_state_flag "register_ok" 1
+  else
+    warn "Register thất bại."; echo "$out" >&2
   fi
 else
   msg "Register đã OK trước đó → bỏ qua."
@@ -523,16 +640,34 @@ if [[ "$OPTIN_OK" -ne 1 || -n "$FORCE_OPTIN" ]]; then
     msg "Opt-in operator ..."
     HAS_OP_PK_FLAG=0
     docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 optin --help 2>&1 | grep -q -- '--eth-private-key' && HAS_OP_PK_FLAG=1 || true
-    if [[ "$HAS_OP_PK_FLAG" -eq 1 ]]; then
-      docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
-        optin --eth-rpc-url "$HOODI_RPC" \
-              --trap-config-address "$TRAP_ADDR" \
-              --eth-private-key "$PK_0X" \
-      && { OPTIN_OK=1; set_state_flag "optin_ok" 1; } || warn "Opt-in thất bại."
+
+    run_optin() {
+      local rpc="$1" out rc
+      if [[ "$HAS_OP_PK_FLAG" -eq 1 ]]; then
+        out="$({ docker run --rm ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+          optin --eth-rpc-url "$rpc" \
+                --trap-config-address "$TRAP_ADDR" \
+                --eth-private-key "$PK_0X"; } 2>&1)"; rc=$?
+      else
+        out="$({ docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
+          optin --eth-rpc-url "$rpc" --trap-config-address "$TRAP_ADDR"; } 2>&1)"; rc=$?
+      fi
+      echo "$out"
+      return "$rc"
+    }
+
+    out="$(run_optin "$HOODI_RPC")"; rc=$?
+
+    if [[ "$rc" -ne 0 && -n "${BACKUP_HOODI_RPC:-}" && "$BACKUP_HOODI_RPC" != "$HOODI_RPC" ]] && is_rpc_403 "$out"; then
+      warn "RPC primary bị 403 → thử backup"
+      out2="$(run_optin "$BACKUP_HOODI_RPC")"; rc=$?
+      [[ "$rc" -eq 0 ]] && out="$out2"
+    fi
+
+    if [[ "$rc" -eq 0 ]]; then
+      OPTIN_OK=1; set_state_flag "optin_ok" 1
     else
-      docker run --rm -e DRO__ETH__PRIVATE_KEY="$PK_0X" ghcr.io/drosera-network/drosera-operator:v1.20.0 \
-        optin --eth-rpc-url "$HOODI_RPC" --trap-config-address "$TRAP_ADDR" \
-      && { OPTIN_OK=1; set_state_flag "optin_ok" 1; } || warn "Opt-in thất bại."
+      warn "Opt-in thất bại."; echo "$out" >&2
     fi
   else
     warn "Không có trapAddress hợp lệ → bỏ qua opt-in."
