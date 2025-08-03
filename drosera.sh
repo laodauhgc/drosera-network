@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # Drosera One-shot Installer v2.3.1 – 03-Aug-2025 (SGT)
-# Hotfix vs v2.3.0:
-# - Sửa lỗi khối capture output/exit-code dưới set -e (register/opt-in)
-# - Tránh dùng command substitution khi lệnh có thể fail → không bị trap ERR
-# - Loại bỏ RPC Ankr sai do người dùng báo
-# - Giữ toàn bộ cải tiến chọn RPC thông minh + fallback
 
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
